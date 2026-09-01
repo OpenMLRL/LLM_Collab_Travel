@@ -296,6 +296,16 @@ def main() -> None:
         eval_aggregator=aggregate_single_turn_metrics,
         args=trainer_args,
     )
+    if _bool(config.get("agent_model.gradient_checkpointing", True), default=True):
+        for agent in trainer.agents:
+            if not hasattr(agent, "gradient_checkpointing_enable"):
+                continue
+            try:
+                agent.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            except TypeError:
+                agent.gradient_checkpointing_enable()
     trainer.train()
 
     if _bool(config.get("output.save_final_model", False)):

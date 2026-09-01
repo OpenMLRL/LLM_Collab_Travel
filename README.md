@@ -21,6 +21,11 @@ sole-planning reference information.
   `current_city`, `transportation`, `breakfast`, `attraction`, `lunch`,
   `dinner`, and `accommodation`.
 
+The default model uses PyTorch SDPA plus gradient checkpointing. Do not switch
+back to BFCL's `eager` attention setting: TravelPlanner reference prompts are
+much longer, and eager attention's quadratic memory footprint can OOM even on
+high-memory GPUs.
+
 An action is JSON:
 
 ```json

@@ -6,7 +6,10 @@ agent_model:
   top_k: null
   special_tokens: {}
   torch_dtype: bfloat16
-  attn_implementation: eager
+  # TravelPlanner prompts are much longer than BFCL prompts. Eager attention
+  # materializes an O(sequence_length^2) attention matrix and OOMs even on B200.
+  attn_implementation: sdpa
+  gradient_checkpointing: true
 
 agents: null
 
