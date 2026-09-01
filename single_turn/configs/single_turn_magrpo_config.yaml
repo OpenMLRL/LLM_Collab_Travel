@@ -24,28 +24,31 @@ seed: 42
 
 output:
   base_dir: output_single_turn_magrpo
-  verbose: false
-  save_final_model: false
+  verbose: true
+  save_final_model: true
 
 travel:
-  role_mode: soft_roles
+  role_mode: partitioned_roles
 
 travel_reward:
   parse_weight: 0.05
-  coverage_weight: 0.15
+  coverage_weight: 0.30
   slot_quality_weight: 0.35
-  grounding_weight: 0.15
-  balance_weight: 0.10
+  grounding_weight: 0.0
+  empty_match_weight: 0.05
+  balance_weight: 0.15
   role_weight: 0.10
   exact_bonus: 0.20
-  overlap_penalty: 0.10
-  conflict_penalty: 0.20
-  lazy_agent_penalty: 0.15
-  invalid_slot_penalty: 0.05
-  extra_assignment_penalty: 0.05
-  self_duplicate_penalty: 0.10
+  cooperation_floor: 0.20
+  overlap_penalty: 0.15
+  conflict_penalty: 0.30
+  lazy_agent_penalty: 0.25
+  invalid_slot_penalty: 0.15
+  extra_assignment_penalty: 0.25
+  self_duplicate_penalty: 0.15
   empty_mismatch_penalty: 0.25
-  min_reward: -0.4
+  spurious_fill_penalty: 0.10
+  min_reward: -0.5
   max_reward: 1.2
 
 magrpo:
@@ -61,7 +64,7 @@ magrpo:
   agent_learning_rate: 2.0e-05
   logging_steps: 20
   num_generations: 4
-  max_new_tokens: 1536
+  max_new_tokens: 1024
   discount: 1.0
   joint_mode: aligned
   early_termination_threshold: null
@@ -69,7 +72,9 @@ magrpo:
   train_batch_size: 4
   advantage_normalization: true
   advantage_mode: mean
-  eval_interval: 8
+  # The trainer interprets this as a within-epoch batch interval. With 40 rows,
+  # 40 means one evaluation at the start of each epoch instead of five.
+  eval_interval: 40
   eval_num_samples: 5
   eval_batch_size: 1
   reference_kl_enabled: false
@@ -78,14 +83,14 @@ magrpo:
 
 reward_processor:
   enabled: true
-  scale_factor: 4.0
+  scale_factor: 1.0
   shift: null
 
 wandb:
   enabled: true
-  project: travelplanner-collab
+  project: Travel
   entity: OpenMLRL
-  name: single_turn_magrpo_qwen3_4b_role_guided
+  name: Travel-magrpo-qwen3-4b-partitioned-v2
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -94,3 +99,4 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
+  - reward-v2

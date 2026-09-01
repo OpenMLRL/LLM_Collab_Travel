@@ -18,7 +18,7 @@ for path in (COMLRL_ROOT, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from single_turn.aggregation import EXPERIENCE_FIELDS, LOGISTICS_FIELDS, PLAN_FIELDS
+from single_turn.aggregation import PLAN_FIELDS, slot_owner
 from single_turn.config import Config, add_config_args, parse_overrides
 from single_turn.data import load_single_turn_datasets
 from single_turn.formatting import get_single_turn_formatters
@@ -107,27 +107,24 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
 def _gold_completions(batch_item: Dict[str, Any]) -> List[str]:
     """Build a conflict-free two-agent oracle output for dry-run verification."""
 
-    logistics = []
-    experience = []
+    per_agent = [[], []]
     for row in batch_item["gold_plan"]:
         day = int(row["day"])
         for field in PLAN_FIELDS:
             assignment = {"day": day, "field": field, "value": row[field]}
-            if field in LOGISTICS_FIELDS:
-                logistics.append(assignment)
-            elif field in EXPERIENCE_FIELDS:
-                experience.append(assignment)
+            per_agent[slot_owner(day, field, int(batch_item["days"]))].append(
+                assignment
+            )
 
-    total_slots = len(PLAN_FIELDS) * int(batch_item["days"])
-    capacity = (total_slots + 1) // 2
-    spillover = experience[capacity:]
-    experience = experience[:capacity]
-    logistics.extend(spillover)
-    if len(logistics) > capacity:
-        raise AssertionError("Oracle role split exceeded assignment capacity.")
+    capacity = (len(PLAN_FIELDS) * int(batch_item["days"]) + 1) // 2
+    if any(len(assignments) > capacity for assignments in per_agent):
+        raise AssertionError("Oracle role partition exceeded assignment capacity.")
     return [
-        json.dumps({"agent_id": 0, "assignments": logistics}, ensure_ascii=False),
-        json.dumps({"agent_id": 1, "assignments": experience}, ensure_ascii=False),
+        json.dumps(
+            {"agent_id": agent_idx, "assignments": assignments},
+            ensure_ascii=False,
+        )
+        for agent_idx, assignments in enumerate(per_agent)
     ]
 
 
@@ -146,7 +143,7 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
     expected_env_steps = len(train_rows) * epochs * num_generations
     formatters = get_single_turn_formatters(
         num_agents=int(magrpo.get("num_agents", 2)),
-        role_mode=str(config.get("travel.role_mode", "soft_roles")),
+        role_mode=str(config.get("travel.role_mode", "partitioned_roles")),
     )
     report = {
         "status": "ok",
@@ -241,7 +238,7 @@ def main() -> None:
         agent_learning_rate=float(magrpo_section.get("agent_learning_rate", 2e-5)),
         logging_steps=int(magrpo_section.get("logging_steps", 20)),
         num_generations=int(magrpo_section.get("num_generations", 4)),
-        max_new_tokens=int(magrpo_section.get("max_new_tokens", 1536)),
+        max_new_tokens=int(magrpo_section.get("max_new_tokens", 1024)),
         temperature=float(model_config.temperature),
         top_p=float(model_config.top_p),
         top_k=model_config.top_k,
@@ -256,7 +253,7 @@ def main() -> None:
             magrpo_section.get("advantage_normalization", True), default=True
         ),
         advantage_mode=str(magrpo_section.get("advantage_mode", "mean")),
-        eval_interval=int(magrpo_section.get("eval_interval", 8)),
+        eval_interval=int(magrpo_section.get("eval_interval", 40)),
         eval_num_samples=int(magrpo_section.get("eval_num_samples", 5)),
         eval_batch_size=int(magrpo_section.get("eval_batch_size", 1)),
         reference_kl_enabled=_bool(
@@ -270,7 +267,7 @@ def main() -> None:
     reward = make_reward(reward_config)
     formatters = get_single_turn_formatters(
         num_agents=num_agents,
-        role_mode=str(config.get("travel.role_mode", "soft_roles")),
+        role_mode=str(config.get("travel.role_mode", "partitioned_roles")),
     )
     trainer = MAGRPOTrainer(
         agent_model=model_config.name if not agent_names else None,

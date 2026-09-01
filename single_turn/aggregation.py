@@ -37,6 +37,35 @@ def assignment_capacity(days: int, num_agents: int) -> int:
     return int(math.ceil((len(PLAN_FIELDS) * int(days)) / max(1, int(num_agents))))
 
 
+def slot_owner(day: int, field: str, days: int) -> int:
+    """Return the deterministic two-agent owner for one itinerary slot.
+
+    Logistics always belongs to agent 0, daily experience belongs to agent 1,
+    and even-day dinner slots move to agent 0 to balance odd-length trips.
+    """
+
+    day = int(day)
+    days = int(days)
+    if not 1 <= day <= days or field not in PLAN_FIELDS:
+        raise ValueError(f"Invalid TravelPlanner slot: day={day}, field={field!r}")
+    if field in LOGISTICS_FIELDS:
+        return 0
+    if field == "dinner" and day % 2 == 0:
+        return 0
+    return 1
+
+
+def owned_slots(agent_idx: int, days: int) -> Set[Slot]:
+    if agent_idx not in {0, 1}:
+        raise ValueError("The initial TravelPlanner task has exactly two agents.")
+    return {
+        (day, field)
+        for day in range(1, int(days) + 1)
+        for field in PLAN_FIELDS
+        if slot_owner(day, field, int(days)) == agent_idx
+    }
+
+
 @dataclass
 class MergeResult:
     plan: List[Dict[str, object]]
@@ -83,7 +112,16 @@ def merge_agent_assignments(
 ) -> MergeResult:
     num_agents = len(agent_completions)
     cap = assignment_capacity(days, num_agents) if capacity is None else int(capacity)
-    parsed = [parse_assignments(completion or "") for completion in agent_completions]
+    parsed = [
+        parse_assignments(
+            completion or "",
+            expected_agent_id=agent_idx,
+            capacity=cap,
+            days=days,
+            valid_fields=PLAN_FIELDS,
+        )
+        for agent_idx, completion in enumerate(agent_completions)
+    ]
 
     invalid_slot_count = sum(result.invalid_item_count for result in parsed)
     extra_assignment_count = 0
@@ -92,8 +130,11 @@ def merge_agent_assignments(
 
     for result in parsed:
         accepted: Dict[Slot, str] = {}
-        allowed = result.assignments[:cap]
-        extra_assignment_count += max(0, len(result.assignments) - cap)
+        # An over-capacity action is atomic and invalid.  Dropping only its tail
+        # would still reward the "emit the whole plan and let the merger trim it"
+        # policy observed in the first smoke run.
+        allowed = result.assignments if result.capacity_valid else []
+        extra_assignment_count += max(0, result.raw_item_count - cap)
         for assignment in allowed:
             validated = _validate_assignment(assignment, days=days)
             if validated is None:

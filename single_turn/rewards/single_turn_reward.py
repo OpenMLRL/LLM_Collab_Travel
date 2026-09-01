@@ -12,12 +12,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from single_turn.aggregation import (
-    EXPERIENCE_FIELDS,
-    LOGISTICS_FIELDS,
     PLAN_FIELDS,
     MergeResult,
     canonical_value,
     merge_agent_assignments,
+    owned_slots,
 )
 
 
@@ -202,36 +201,73 @@ def _is_grounded(
 
 def _effective_agent_counts(
     result: MergeResult,
+    days: int,
     gold: Dict[Tuple[int, str], str],
+    batch_item: Dict[str, Any],
 ) -> List[float]:
     counts: List[float] = []
-    for assignments in result.per_agent_assignments:
+    for agent_idx, assignments in enumerate(result.per_agent_assignments):
+        primary = owned_slots(agent_idx, days) if agent_idx < 2 else set()
         score = 0.0
         for slot, value in assignments.items():
             if slot not in result.merged_assignments:
                 continue
-            score += slot_similarity(value, gold[slot], slot[1])
+            if primary and slot not in primary:
+                continue
+            if canonical_value(gold[slot]) == "-":
+                continue
+            similarity = slot_similarity(value, gold[slot], slot[1])
+            grounded = _is_grounded(
+                value,
+                field=slot[1],
+                batch_item=batch_item,
+                gold_value=gold[slot],
+            )
+            score += 0.5 * similarity + 0.5 * float(grounded)
         counts.append(score)
     return counts
+
+
+def _semantic_role_targets(
+    days: int,
+    gold: Dict[Tuple[int, str], str],
+) -> List[int]:
+    return [
+        sum(
+            canonical_value(gold[slot]) != "-"
+            for slot in owned_slots(agent_idx, days)
+        )
+        for agent_idx in range(2)
+    ]
+
+
+def _cooperative_contribution_score(
+    result: MergeResult,
+    days: int,
+    gold: Dict[Tuple[int, str], str],
+    batch_item: Dict[str, Any],
+) -> Tuple[float, List[float]]:
+    counts = _effective_agent_counts(result, days, gold, batch_item)
+    targets = _semantic_role_targets(days, gold)
+    ratios = [
+        min(1.0, count / max(1, target))
+        for count, target in zip(counts[:2], targets)
+    ]
+    if len(ratios) < 2 or not all(ratio > 0 for ratio in ratios):
+        return 0.0, ratios
+    return 2.0 * ratios[0] * ratios[1] / (ratios[0] + ratios[1]), ratios
 
 
 def _balance_score(
     result: MergeResult,
     days: int,
     gold: Dict[Tuple[int, str], str],
+    batch_item: Dict[str, Any],
 ) -> float:
-    counts = _effective_agent_counts(result, gold)
-    if not counts:
-        return 0.0
-    total_slots = len(PLAN_FIELDS) * days
-    if len(counts) == 2:
-        experience_target = min(len(EXPERIENCE_FIELDS) * days, result.capacity)
-        targets = [total_slots - experience_target, experience_target]
-    else:
-        base, extra = divmod(total_slots, len(counts))
-        targets = [base + int(index < extra) for index in range(len(counts))]
-    difference = sum(abs(actual - target) for actual, target in zip(counts, targets))
-    return max(0.0, 1.0 - difference / max(1, total_slots))
+    cooperative_score, _ = _cooperative_contribution_score(
+        result, days, gold, batch_item
+    )
+    return cooperative_score
 
 
 def _role_score(
@@ -239,39 +275,47 @@ def _role_score(
     days: int,
     gold: Dict[Tuple[int, str], str],
 ) -> float:
-    role_fields = [LOGISTICS_FIELDS, EXPERIENCE_FIELDS]
     scores = []
     for agent_idx, assignments in enumerate(result.per_agent_assignments):
-        if agent_idx >= len(role_fields):
+        if agent_idx >= 2:
             continue
-        primary = role_fields[agent_idx]
-        achievable = min(len(primary) * days, result.capacity)
+        primary = owned_slots(agent_idx, days)
+        achievable = sum(canonical_value(gold[slot]) != "-" for slot in primary)
+        if achievable == 0:
+            continue
         primary_credit = sum(
             slot_similarity(value, gold[slot], slot[1])
             for slot, value in assignments.items()
-            if slot in result.merged_assignments and slot[1] in primary
+            if slot in result.merged_assignments
+            and slot in primary
+            and canonical_value(gold[slot]) != "-"
         )
         scores.append(primary_credit / max(1, achievable))
-    return sum(scores) / len(scores) if scores else 0.0
+    if len(scores) < 2 or not all(score > 0 for score in scores):
+        return 0.0
+    return 2.0 * scores[0] * scores[1] / (scores[0] + scores[1])
 
 
 @dataclass
 class TravelRewardConfig:
     parse_weight: float = 0.05
-    coverage_weight: float = 0.15
+    coverage_weight: float = 0.30
     slot_quality_weight: float = 0.35
-    grounding_weight: float = 0.15
-    balance_weight: float = 0.10
+    grounding_weight: float = 0.0
+    empty_match_weight: float = 0.05
+    balance_weight: float = 0.15
     role_weight: float = 0.10
     exact_bonus: float = 0.20
-    overlap_penalty: float = 0.10
-    conflict_penalty: float = 0.20
-    lazy_agent_penalty: float = 0.15
-    invalid_slot_penalty: float = 0.05
-    extra_assignment_penalty: float = 0.05
-    self_duplicate_penalty: float = 0.10
+    cooperation_floor: float = 0.20
+    overlap_penalty: float = 0.15
+    conflict_penalty: float = 0.30
+    lazy_agent_penalty: float = 0.25
+    invalid_slot_penalty: float = 0.15
+    extra_assignment_penalty: float = 0.25
+    self_duplicate_penalty: float = 0.15
     empty_mismatch_penalty: float = 0.25
-    min_reward: float = -0.4
+    spurious_fill_penalty: float = 0.10
+    min_reward: float = -0.5
     max_reward: float = 1.2
 
     @classmethod
@@ -334,23 +378,66 @@ def score_single_turn_response(
         )
     result = merge_agent_assignments(agent_completions, days=days)
 
-    parse_score = sum(float(parsed.parse_success) for parsed in result.parsed) / max(
+    strict_format_score = sum(
+        float(parsed.parse_success) for parsed in result.parsed
+    ) / max(
         1, len(result.parsed)
+    )
+    decode_score = sum(float(parsed.decode_success) for parsed in result.parsed) / max(
+        1, len(result.parsed)
+    )
+    agent_action_validity = []
+    ownership_validity = []
+    for agent_idx, (parsed, count, assignments) in enumerate(
+        zip(
+            result.parsed,
+            result.agent_assignment_counts,
+            result.per_agent_assignments,
+        )
+    ):
+        owned = owned_slots(agent_idx, days) if agent_idx < 2 else set()
+        ownership_valid = bool(owned) and set(assignments).issubset(owned)
+        expected_count = len(owned)
+        ownership_validity.append(float(ownership_valid))
+        agent_action_validity.append(
+            float(
+                parsed.parse_success
+                and ownership_valid
+                and count == expected_count
+                and count == parsed.raw_item_count
+            )
+        )
+    action_validity_score = sum(agent_action_validity) / max(
+        1, len(agent_action_validity)
     )
     raw_coverage_score = len(result.covered_slots) / total_slots
 
-    similarities = []
+    all_similarities = []
+    semantic_similarities = []
     grounding_values = []
     exact_slots = 0
     valid_covered_slots = 0
+    raw_semantic_covered_slots = 0
+    empty_gold_slots = 0
+    correct_empty_slots = 0
     for slot, gold_value in gold.items():
         predicted = result.merged_assignments.get(slot)
         if predicted is None:
-            similarities.append(0.0)
+            all_similarities.append(0.0)
+            if canonical_value(gold_value) == "-":
+                empty_gold_slots += 1
+            else:
+                semantic_similarities.append(0.0)
             continue
         similarity = slot_similarity(predicted, gold_value, slot[1])
-        similarities.append(similarity)
+        all_similarities.append(similarity)
         exact_slots += int(similarity >= 1.0 - 1e-9)
+        if canonical_value(gold_value) == "-":
+            empty_gold_slots += 1
+            correct_empty_slots += int(canonical_value(predicted) == "-")
+            continue
+        semantic_similarities.append(similarity)
+        raw_semantic_covered_slots += 1
         grounded = _is_grounded(
             predicted,
             field=slot[1],
@@ -359,60 +446,149 @@ def score_single_turn_response(
         )
         grounding_values.append(float(grounded))
         valid_covered_slots += int(grounded)
-    slot_quality = sum(similarities) / total_slots
-    coverage_score = valid_covered_slots / total_slots
-    grounding_score = (
+    semantic_slot_count = len(semantic_similarities)
+    slot_quality = sum(semantic_similarities) / max(1, semantic_slot_count)
+    all_slot_quality = sum(all_similarities) / total_slots
+    coverage_score = valid_covered_slots / max(1, semantic_slot_count)
+    raw_semantic_coverage = raw_semantic_covered_slots / max(1, semantic_slot_count)
+    grounding_precision = (
         sum(grounding_values) / len(grounding_values) if grounding_values else 0.0
     )
-    balance_score = _balance_score(result, days, gold)
+    empty_recall = (
+        correct_empty_slots / empty_gold_slots if empty_gold_slots else 1.0
+    )
+    empty_match_score = empty_recall * coverage_score
+    balance_score = _balance_score(result, days, gold, batch_item)
     role_score = _role_score(result, days, gold)
+    cooperative_contribution, contribution_ratios = _cooperative_contribution_score(
+        result, days, gold, batch_item
+    )
 
-    lazy_agents = sum(1 for count in result.agent_assignment_counts if count == 0)
+    owned_nonconflict_counts = []
+    owned_target_counts = []
+    for agent_idx, assignments in enumerate(result.per_agent_assignments[:2]):
+        owned = owned_slots(agent_idx, days)
+        owned_target_counts.append(len(owned))
+        owned_nonconflict_counts.append(
+            sum(
+                slot in owned and slot in result.merged_assignments
+                for slot in assignments
+            )
+        )
+    action_contribution_ratios = [
+        min(1.0, count / max(1, target))
+        for count, target in zip(owned_nonconflict_counts, owned_target_counts)
+    ]
+    minimum_action_contribution = min(action_contribution_ratios, default=0.0)
+    lazy_deficit = 1.0 - minimum_action_contribution
+    lazy_agents = sum(1 for ratio in action_contribution_ratios if ratio <= 0.0)
     lazy_rate = lazy_agents / max(1, len(agent_completions))
-    overlap_rate = min(1.0, result.overlap_count / total_slots)
-    conflict_rate = min(1.0, len(result.conflict_slots) / total_slots)
-    invalid_slot_rate = min(1.0, result.invalid_slot_count / total_slots)
-    extra_assignment_rate = min(1.0, result.extra_assignment_count / total_slots)
-    self_duplicate_rate = min(1.0, result.self_duplicate_count / total_slots)
+    proposed_slots = set().union(
+        *(set(assignments) for assignments in result.per_agent_assignments)
+    )
+    proposed_slot_count = len(proposed_slots)
+    raw_assignment_count = sum(parsed.raw_item_count for parsed in result.parsed)
+    per_agent_distinct_counts = result.agent_assignment_counts
+    collision_denominator = max(1, min(per_agent_distinct_counts, default=0))
+    overlap_rate = min(1.0, result.overlap_count / collision_denominator)
+    conflict_rate = min(
+        1.0, len(result.conflict_slots) / collision_denominator
+    )
+    invalid_slot_rate = min(
+        1.0, result.invalid_slot_count / max(1, raw_assignment_count)
+    )
+    extra_assignment_rate = min(
+        1.0, result.extra_assignment_count / max(1, raw_assignment_count)
+    )
+    overcapacity_agent_rate = sum(
+        float(not parsed.capacity_valid) for parsed in result.parsed
+    ) / max(1, len(result.parsed))
+    self_duplicate_rate = min(
+        1.0, result.self_duplicate_count / max(1, raw_assignment_count)
+    )
     empty_mismatch_count = sum(
         1
         for slot, predicted in result.merged_assignments.items()
         if canonical_value(predicted) == "-" and canonical_value(gold[slot]) != "-"
     )
-    empty_mismatch_rate = empty_mismatch_count / total_slots
+    empty_mismatch_rate = empty_mismatch_count / max(1, semantic_slot_count)
+    spurious_fill_count = sum(
+        1
+        for slot, predicted in result.merged_assignments.items()
+        if canonical_value(predicted) != "-" and canonical_value(gold[slot]) == "-"
+    )
+    spurious_fill_rate = spurious_fill_count / max(1, empty_gold_slots)
     exact_match = exact_slots == total_slots and not result.conflict_slots
+    team_action_valid = bool(agent_action_validity) and all(agent_action_validity)
+    cooperation_gate = (
+        cfg.cooperation_floor
+        + (1.0 - cfg.cooperation_floor) * float(team_action_valid)
+    ) * (
+        cfg.cooperation_floor
+        + (1.0 - cfg.cooperation_floor) * cooperative_contribution
+    )
+    contribution_deficit = 1.0 - cooperative_contribution
 
-    reward = (
-        cfg.parse_weight * parse_score
-        + cfg.coverage_weight * coverage_score
+    plan_score = (
+        cfg.coverage_weight * coverage_score
         + cfg.slot_quality_weight * slot_quality
-        + cfg.grounding_weight * grounding_score
+        # Grounded coverage, rather than conditional grounding precision, prevents
+        # a team from receiving a large reward for one grounded slot.
+        + cfg.grounding_weight * coverage_score
+        + cfg.empty_match_weight * empty_match_score
         + cfg.balance_weight * balance_score
         + cfg.role_weight * role_score
-        + (cfg.exact_bonus if exact_match else 0.0)
+    )
+
+    reward = (
+        cfg.parse_weight * strict_format_score
+        + cooperation_gate * plan_score
+        + (cfg.exact_bonus if exact_match and team_action_valid else 0.0)
         - cfg.overlap_penalty * overlap_rate
         - cfg.conflict_penalty * conflict_rate
-        - cfg.lazy_agent_penalty * lazy_rate
+        - cfg.lazy_agent_penalty * lazy_deficit
         - cfg.invalid_slot_penalty * invalid_slot_rate
-        - cfg.extra_assignment_penalty * extra_assignment_rate
+        - cfg.extra_assignment_penalty * overcapacity_agent_rate
         - cfg.self_duplicate_penalty * self_duplicate_rate
         - cfg.empty_mismatch_penalty * empty_mismatch_rate
+        - cfg.spurious_fill_penalty * spurious_fill_rate
     )
     reward = _clamp(reward, cfg.min_reward, cfg.max_reward)
 
     detail: Dict[str, Any] = {
         "reward": float(reward),
         "exact_match": float(exact_match),
-        "parse_success": float(parse_score),
+        "rewarded_exact_match": float(exact_match and team_action_valid),
+        "parse_success": float(strict_format_score),
+        "decode_success": float(decode_score),
+        "action_validity": float(action_validity_score),
+        "agent_action_validity": agent_action_validity,
+        "ownership_validity": ownership_validity,
+        "team_action_valid": float(team_action_valid),
+        "cooperation_gate": float(cooperation_gate),
+        "cooperative_contribution": float(cooperative_contribution),
+        "contribution_ratios": contribution_ratios,
+        "contribution_deficit": float(contribution_deficit),
+        "action_contribution_ratios": action_contribution_ratios,
+        "lazy_deficit": float(lazy_deficit),
+        "plan_score": float(plan_score),
         "coverage": float(coverage_score),
         "raw_coverage": float(raw_coverage_score),
+        "raw_semantic_coverage": float(raw_semantic_coverage),
         "slot_quality": float(slot_quality),
-        "grounding": float(grounding_score),
+        "all_slot_quality": float(all_slot_quality),
+        "grounding": float(grounding_precision),
+        "empty_recall": float(empty_recall),
+        "empty_match_score": float(empty_match_score),
+        "semantic_slots": float(semantic_slot_count),
+        "empty_gold_slots": float(empty_gold_slots),
+        "correct_empty_slots": float(correct_empty_slots),
         "balance_score": float(balance_score),
         "role_score": float(role_score),
         "exact_slots": float(exact_slots),
         "total_slots": float(total_slots),
         "covered_slots": float(valid_covered_slots),
+        "raw_semantic_covered_slots": float(raw_semantic_covered_slots),
         "raw_covered_slots": float(len(result.covered_slots)),
         "overlap_count": float(result.overlap_count),
         "overlap_rate": float(overlap_rate),
@@ -424,15 +600,18 @@ def score_single_turn_response(
         "invalid_slot_rate": float(invalid_slot_rate),
         "extra_assignment_count": float(result.extra_assignment_count),
         "extra_assignment_rate": float(extra_assignment_rate),
+        "overcapacity_agent_rate": float(overcapacity_agent_rate),
         "self_duplicate_count": float(result.self_duplicate_count),
         "self_duplicate_rate": float(self_duplicate_rate),
         "empty_mismatch_count": float(empty_mismatch_count),
         "empty_mismatch_rate": float(empty_mismatch_rate),
+        "spurious_fill_count": float(spurious_fill_count),
+        "spurious_fill_rate": float(spurious_fill_rate),
         "capacity_per_agent": float(result.capacity),
-        "raw_assignment_count": float(
-            sum(parsed.raw_item_count for parsed in result.parsed)
-        ),
+        "proposed_slot_count": float(proposed_slot_count),
+        "raw_assignment_count": float(raw_assignment_count),
         "agent_assignment_counts": result.agent_assignment_counts,
+        "parser_errors": [list(parsed.error_codes) for parsed in result.parsed],
         "merged_plan": result.plan,
         "reward_backend": "annotated_plan_reference",
     }
