@@ -1,0 +1,309 @@
+"""Train MAGRPO on one-shot, role-guided TravelPlanner collaboration."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+
+TASK_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = TASK_ROOT.parent
+DEFAULT_CONFIG = TASK_ROOT / "configs" / "single_turn_magrpo_config.yaml"
+COMLRL_ROOT = REPO_ROOT.parent / "CoMLRL"
+for path in (COMLRL_ROOT, REPO_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from single_turn.aggregation import EXPERIENCE_FIELDS, LOGISTICS_FIELDS, PLAN_FIELDS
+from single_turn.config import Config, add_config_args, parse_overrides
+from single_turn.data import load_single_turn_datasets
+from single_turn.formatting import get_single_turn_formatters
+from single_turn.logger import (
+    aggregate_single_turn_metrics,
+    build_single_turn_eval_logger,
+)
+from single_turn.rewards import make_reward
+from single_turn.rewards.single_turn_reward import score_single_turn_response
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _resolve_dataset_name(dataset_name: str) -> str:
+    path = Path(dataset_name)
+    if path.is_absolute() or path.exists():
+        return str(path)
+    repo_path = REPO_ROOT / dataset_name
+    return str(repo_path) if repo_path.exists() else dataset_name
+
+
+def _agent_names(config: Config) -> Optional[List[str]]:
+    raw = config.get("agents")
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)) or not all(isinstance(x, str) for x in raw):
+        raise ValueError("agents must be a list of model names.")
+    return [str(name) for name in raw]
+
+
+def _load_data(config: Config):
+    return load_single_turn_datasets(
+        _resolve_dataset_name(str(config.get("dataset.name"))),
+        config_name=str(config.get("dataset.config_name", "train")),
+        split=str(config.get("dataset.source_split", "train")),
+        train_samples=int(config.get("dataset.train_samples", 40)),
+        eval_samples=int(config.get("dataset.eval_samples", 5)),
+        seed=int(config.get("seed", 42)),
+    )
+
+
+def _build_reward_processor(config: Config):
+    if not _bool(config.get("reward_processor.enabled", False)):
+        return None
+    from comlrl.utils.reward_processor import RewardProcessors
+
+    processor = RewardProcessors.scale(
+        factor=float(config.get("reward_processor.scale_factor", 1.0))
+    )
+    shift = config.get("reward_processor.shift")
+    if shift is None:
+        return processor
+    shift_processor = RewardProcessors.shift(value=float(shift))
+    return lambda value: shift_processor(processor(value))
+
+
+def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
+    section = config.get_section("wandb")
+    if not _bool(section.get("enabled", True), default=True):
+        return None
+    return {
+        "project": section.get("project", "travelplanner-collab"),
+        "entity": section.get("entity", "OpenMLRL"),
+        "name": section.get("name", "single_turn_magrpo"),
+        "dir": section.get("dir", output_dir),
+        "tags": section.get(
+            "tags", ["magrpo", "travelplanner", "single-turn", "decentralized"]
+        ),
+        "config_sections": {
+            "dataset": config.get_section("dataset"),
+            "agent_model": config.get_section("agent_model"),
+            "travel": config.get_section("travel"),
+            "travel_reward": config.get_section("travel_reward"),
+            "output": config.get_section("output"),
+            "trainer": trainer_cfg,
+        },
+    }
+
+
+def _gold_completions(batch_item: Dict[str, Any]) -> List[str]:
+    """Build a conflict-free two-agent oracle output for dry-run verification."""
+
+    logistics = []
+    experience = []
+    for row in batch_item["gold_plan"]:
+        day = int(row["day"])
+        for field in PLAN_FIELDS:
+            assignment = {"day": day, "field": field, "value": row[field]}
+            if field in LOGISTICS_FIELDS:
+                logistics.append(assignment)
+            elif field in EXPERIENCE_FIELDS:
+                experience.append(assignment)
+
+    total_slots = len(PLAN_FIELDS) * int(batch_item["days"])
+    capacity = (total_slots + 1) // 2
+    spillover = experience[capacity:]
+    experience = experience[:capacity]
+    logistics.extend(spillover)
+    if len(logistics) > capacity:
+        raise AssertionError("Oracle role split exceeded assignment capacity.")
+    return [
+        json.dumps({"agent_id": 0, "assignments": logistics}, ensure_ascii=False),
+        json.dumps({"agent_id": 1, "assignments": experience}, ensure_ascii=False),
+    ]
+
+
+def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) -> None:
+    magrpo = config.get_section("magrpo")
+    reward_cfg = config.get_section("travel_reward")
+    sample = train_rows[0]
+    completions = _gold_completions(sample)
+    reward, details = score_single_turn_response(
+        completions,
+        batch_item=sample,
+        config=make_reward(reward_cfg).config,
+    )
+    num_generations = int(magrpo.get("num_generations", 4))
+    epochs = int(magrpo.get("num_train_epochs", 1))
+    expected_env_steps = len(train_rows) * epochs * num_generations
+    formatters = get_single_turn_formatters(
+        num_agents=int(magrpo.get("num_agents", 2)),
+        role_mode=str(config.get("travel.role_mode", "soft_roles")),
+    )
+    report = {
+        "status": "ok",
+        "train_rows": len(train_rows),
+        "eval_rows": len(eval_rows),
+        "epochs": epochs,
+        "aligned_generations": num_generations,
+        "expected_env_steps": expected_env_steps,
+        "expected_agent_completions": expected_env_steps
+        * int(magrpo.get("num_agents", 2)),
+        "oracle_reward": reward,
+        "oracle_exact_match": details["exact_match"],
+        "oracle_coverage": details["coverage"],
+        "oracle_conflicts": details["conflict_count"],
+        "sample_days": sample["days"],
+        "sample_prompt_chars": [len(formatter(sample)) for formatter in formatters],
+    }
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Train MAGRPO on single-turn TravelPlanner collaboration."
+    )
+    add_config_args(parser)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Load data and verify prompts/reward without loading an LLM.",
+    )
+    args = parser.parse_args()
+    config = Config(args.config or str(DEFAULT_CONFIG))
+    if args.override:
+        config.update(parse_overrides(args.override))
+
+    train_rows, eval_rows = _load_data(config)
+    magrpo_section = config.get_section("magrpo")
+    num_agents = int(magrpo_section.get("num_agents", 2))
+    if num_agents != 2:
+        raise ValueError("The initial role-guided TravelPlanner task requires 2 agents.")
+    if int(magrpo_section.get("num_turns", 1)) != 1:
+        raise ValueError("This entrypoint intentionally supports exactly one turn.")
+    if str(magrpo_section.get("joint_mode", "aligned")).lower() not in {
+        "align",
+        "aligned",
+    }:
+        raise ValueError("Use joint_mode=aligned to match the BFCL rollout budget.")
+
+    if args.dry_run:
+        _dry_run(config, train_rows, eval_rows)
+        return
+
+    import torch
+    from transformers import AutoTokenizer
+
+    seed = int(config.get("seed", 42))
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    model_config = config.get_agent_model_config()
+    agent_names = _agent_names(config)
+    tokenizer_source = agent_names[0] if agent_names else model_config.name
+    tokenizers = (
+        [AutoTokenizer.from_pretrained(name) for name in agent_names]
+        if agent_names
+        else [AutoTokenizer.from_pretrained(tokenizer_source)]
+    )
+    for tokenizer in tokenizers:
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        padding_side = config.get("tokenizer.padding_side")
+        if padding_side:
+            tokenizer.padding_side = str(padding_side)
+        if model_config.special_tokens:
+            tokenizer.add_special_tokens(model_config.special_tokens)
+
+    output_base = str(config.get("output.base_dir", "output_single_turn_magrpo"))
+    job_id = os.environ.get("SLURM_JOB_ID", "no_job_id")
+    output_dir = os.path.join(output_base, f"job_{job_id}")
+    os.makedirs(output_dir, exist_ok=True)
+    config.save(os.path.join(output_dir, "config.yaml"))
+
+    from comlrl.trainers.reinforce import MAGRPOConfig, MAGRPOTrainer
+
+    trainer_args = MAGRPOConfig(
+        num_agents=num_agents,
+        num_turns=1,
+        parallel_training=str(magrpo_section.get("parallel_training", "mp")),
+        agent_devices=magrpo_section.get("agent_devices", ["cuda:0", "cuda:1"]),
+        num_train_epochs=int(magrpo_section.get("num_train_epochs", 32)),
+        agent_learning_rate=float(magrpo_section.get("agent_learning_rate", 2e-5)),
+        logging_steps=int(magrpo_section.get("logging_steps", 20)),
+        num_generations=int(magrpo_section.get("num_generations", 4)),
+        max_new_tokens=int(magrpo_section.get("max_new_tokens", 1536)),
+        temperature=float(model_config.temperature),
+        top_p=float(model_config.top_p),
+        top_k=model_config.top_k,
+        discount=float(magrpo_section.get("discount", 1.0)),
+        joint_mode="aligned",
+        early_termination_threshold=magrpo_section.get(
+            "early_termination_threshold", None
+        ),
+        rollout_buffer_size=int(magrpo_section.get("rollout_buffer_size", 4)),
+        train_batch_size=int(magrpo_section.get("train_batch_size", 4)),
+        advantage_normalization=_bool(
+            magrpo_section.get("advantage_normalization", True), default=True
+        ),
+        advantage_mode=str(magrpo_section.get("advantage_mode", "mean")),
+        eval_interval=int(magrpo_section.get("eval_interval", 8)),
+        eval_num_samples=int(magrpo_section.get("eval_num_samples", 5)),
+        eval_batch_size=int(magrpo_section.get("eval_batch_size", 1)),
+        reference_kl_enabled=_bool(
+            magrpo_section.get("reference_kl_enabled", False), default=False
+        ),
+        reference_kl_coef=float(magrpo_section.get("reference_kl_coef", 0.1)),
+        reference_devices=magrpo_section.get("reference_devices"),
+    )
+
+    reward_config = config.get_section("travel_reward")
+    reward = make_reward(reward_config)
+    formatters = get_single_turn_formatters(
+        num_agents=num_agents,
+        role_mode=str(config.get("travel.role_mode", "soft_roles")),
+    )
+    trainer = MAGRPOTrainer(
+        agent_model=model_config.name if not agent_names else None,
+        agents=agent_names,
+        num_agents=num_agents,
+        tokenizer=tokenizers if agent_names else tokenizers[0],
+        model_config={
+            "torch_dtype": model_config.torch_dtype,
+            "attn_implementation": model_config.attn_implementation,
+            "special_tokens": model_config.special_tokens,
+        },
+        train_dataset=train_rows,
+        eval_dataset=eval_rows,
+        dataset_type="travelplanner",
+        reward_func=reward,
+        reward_processor=_build_reward_processor(config),
+        formatters=formatters,
+        external_transition=None,
+        wandb_config=_wandb_config(config, output_dir, magrpo_section),
+        eval_logger=build_single_turn_eval_logger(
+            eval_rows, reward_config=reward_config
+        ),
+        eval_aggregator=aggregate_single_turn_metrics,
+        args=trainer_args,
+    )
+    trainer.train()
+
+    if _bool(config.get("output.save_final_model", False)):
+        for agent_idx, agent in enumerate(trainer.agents):
+            save_dir = os.path.join(output_dir, f"agent_{agent_idx}")
+            agent.save_pretrained(save_dir)
+            trainer.tokenizers[agent_idx].save_pretrained(save_dir)
+
+
+if __name__ == "__main__":
+    main()
