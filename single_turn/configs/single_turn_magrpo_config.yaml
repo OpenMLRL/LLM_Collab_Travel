@@ -29,17 +29,30 @@ output:
 
 travel:
   role_mode: partitioned_roles
+  # Render instructions with the model-native system/user/assistant template.
+  use_chat_template: true
+  system_prompt: >-
+    You are one agent in a decentralized travel-planning team. Follow the user's
+    role and output contract exactly. Return only the requested JSON object.
+  # Strict decoding uses "{" as assistant prefill (not a sampled policy token),
+  # then stops each sequence independently at its matching top-level "}".
+  force_json_prefix: true
+  stop_after_complete_json: true
 
 travel_reward:
   parse_weight: 0.05
-  coverage_weight: 0.30
-  slot_quality_weight: 0.35
+  # Prefer choosing the right itinerary entries over merely filling every slot.
+  coverage_weight: 0.20
+  slot_quality_weight: 0.45
   grounding_weight: 0.0
   empty_match_weight: 0.05
   balance_weight: 0.15
   role_weight: 0.10
   exact_bonus: 0.20
   cooperation_floor: 0.20
+  # Equal-weight geometric blend of continuous protocol validity and semantic
+  # contribution. Strict team validity remains an exact-match bonus condition.
+  validity_gate_weight: 0.50
   overlap_penalty: 0.15
   conflict_penalty: 0.30
   lazy_agent_penalty: 0.25
@@ -47,7 +60,7 @@ travel_reward:
   extra_assignment_penalty: 0.25
   self_duplicate_penalty: 0.15
   empty_mismatch_penalty: 0.25
-  spurious_fill_penalty: 0.10
+  spurious_fill_penalty: 0.15
   min_reward: -0.5
   max_reward: 1.2
 
@@ -77,6 +90,7 @@ magrpo:
   eval_interval: 40
   eval_num_samples: 5
   eval_batch_size: 1
+  eval_at_end: true
   reference_kl_enabled: false
   reference_kl_coef: 0.1
   reference_devices: null
@@ -90,7 +104,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-partitioned-v2
+  name: Travel-magrpo-qwen3-4b-partitioned-v3
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -99,4 +113,5 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
-  - reward-v2
+  - reward-v3
+  - structured-json

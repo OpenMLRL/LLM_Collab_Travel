@@ -28,6 +28,7 @@ from single_turn.logger import (
 )
 from single_turn.rewards import make_reward
 from single_turn.rewards.single_turn_reward import score_single_turn_response
+from single_turn.structured_generation import DEFAULT_SYSTEM_PROMPT
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -154,6 +155,7 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
         "expected_env_steps": expected_env_steps,
         "expected_agent_completions": expected_env_steps
         * int(magrpo.get("num_agents", 2)),
+        "eval_at_end": _bool(magrpo.get("eval_at_end", True), default=True),
         "oracle_reward": reward,
         "oracle_exact_match": details["exact_match"],
         "oracle_coverage": details["coverage"],
@@ -227,7 +229,8 @@ def main() -> None:
     os.makedirs(output_dir, exist_ok=True)
     config.save(os.path.join(output_dir, "config.yaml"))
 
-    from comlrl.trainers.reinforce import MAGRPOConfig, MAGRPOTrainer
+    from comlrl.trainers.reinforce import MAGRPOConfig
+    from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer
 
     trainer_args = MAGRPOConfig(
         num_agents=num_agents,
@@ -265,11 +268,18 @@ def main() -> None:
 
     reward_config = config.get_section("travel_reward")
     reward = make_reward(reward_config)
+    formatter_tokenizers = tokenizers if agent_names else tokenizers * num_agents
+    use_chat_template = _bool(
+        config.get("travel.use_chat_template", True), default=True
+    )
     formatters = get_single_turn_formatters(
         num_agents=num_agents,
         role_mode=str(config.get("travel.role_mode", "partitioned_roles")),
+        tokenizers=formatter_tokenizers,
+        use_chat_template=use_chat_template,
+        system_prompt=config.get("travel.system_prompt", DEFAULT_SYSTEM_PROMPT),
     )
-    trainer = MAGRPOTrainer(
+    trainer = StructuredOutputMAGRPOTrainer(
         agent_model=model_config.name if not agent_names else None,
         agents=agent_names,
         num_agents=num_agents,
@@ -292,6 +302,13 @@ def main() -> None:
         ),
         eval_aggregator=aggregate_single_turn_metrics,
         args=trainer_args,
+        chat_formatted_prompts=use_chat_template,
+        force_json_prefix=_bool(
+            config.get("travel.force_json_prefix", True), default=True
+        ),
+        stop_after_complete_json=_bool(
+            config.get("travel.stop_after_complete_json", True), default=True
+        ),
     )
     if _bool(config.get("agent_model.gradient_checkpointing", True), default=True):
         for agent in trainer.agents:
@@ -304,6 +321,14 @@ def main() -> None:
             except TypeError:
                 agent.gradient_checkpointing_enable()
     trainer.train()
+
+    # The periodic schedule evaluates at the start of each epoch. Log one
+    # additional evaluation at the actual final env step so the W&B curve
+    # includes the fully trained policy rather than ending one epoch early.
+    if _bool(magrpo_section.get("eval_at_end", True), default=True):
+        trainer.evaluate(
+            num_eval_samples=int(magrpo_section.get("eval_num_samples", 5))
+        )
 
     if _bool(config.get("output.save_final_model", False)):
         for agent_idx, agent in enumerate(trainer.agents):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from numbers import Real
 from typing import Any, Callable, Dict, Iterable, List
 
 import numpy as np
@@ -14,6 +15,16 @@ from single_turn.rewards.single_turn_reward import (
 
 def _prompt_key(prompt: str) -> str:
     return " ".join((prompt or "").split()).strip()
+
+
+def _scalarize_reward_details(detail: Dict[str, Any]) -> Dict[str, float]:
+    """Keep the dense scalar diagnostics emitted by the reward scorer."""
+
+    return {
+        key: float(value)
+        for key, value in detail.items()
+        if isinstance(value, Real)
+    }
 
 
 def build_single_turn_eval_logger(
@@ -51,9 +62,8 @@ def build_single_turn_eval_logger(
                 config=cfg,
             )
             sample_metrics: Dict[str, Any] = {"sample_id": row.get("id", sample_idx)}
-            for key, value in detail.items():
-                if isinstance(value, (int, float)):
-                    sample_metrics[f"turn_1/{key}"] = float(value)
+            for key, value in _scalarize_reward_details(detail).items():
+                sample_metrics[f"turn_1/{key}"] = value
             metrics.append(sample_metrics)
         return metrics
 

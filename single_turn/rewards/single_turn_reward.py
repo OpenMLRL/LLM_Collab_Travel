@@ -20,8 +20,35 @@ from single_turn.aggregation import (
 )
 
 
+# Keep this list stable so every evaluation step logs both positive and zero
+# rates for each parser failure.  Logging only errors that happened in a batch
+# would make W&B average each sparse series over its positive examples and show
+# a misleading constant value of one.
+PARSER_ERROR_CODES: Tuple[str, ...] = (
+    "decode_failed",
+    "not_strict_json",
+    "top_level_schema",
+    "top_level_type",
+    "assignments_type",
+    "invalid_agent_id",
+    "agent_id_mismatch",
+    "assignment_schema",
+    "assignment_value",
+    "self_duplicate",
+    "capacity_exceeded",
+)
+
+
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+def _harmonic_mean(values: Sequence[float]) -> float:
+    """Return a balance-sensitive continuous team score in ``[0, 1]``."""
+
+    if not values or any(value <= 0.0 for value in values):
+        return 0.0
+    return len(values) / sum(1.0 / value for value in values)
 
 
 def _tokens(value: Any) -> List[str]:
@@ -299,14 +326,15 @@ def _role_score(
 @dataclass
 class TravelRewardConfig:
     parse_weight: float = 0.05
-    coverage_weight: float = 0.30
-    slot_quality_weight: float = 0.35
+    coverage_weight: float = 0.20
+    slot_quality_weight: float = 0.45
     grounding_weight: float = 0.0
     empty_match_weight: float = 0.05
     balance_weight: float = 0.15
     role_weight: float = 0.10
     exact_bonus: float = 0.20
     cooperation_floor: float = 0.20
+    validity_gate_weight: float = 0.50
     overlap_penalty: float = 0.15
     conflict_penalty: float = 0.30
     lazy_agent_penalty: float = 0.25
@@ -314,7 +342,7 @@ class TravelRewardConfig:
     extra_assignment_penalty: float = 0.25
     self_duplicate_penalty: float = 0.15
     empty_mismatch_penalty: float = 0.25
-    spurious_fill_penalty: float = 0.10
+    spurious_fill_penalty: float = 0.15
     min_reward: float = -0.5
     max_reward: float = 1.2
 
@@ -386,8 +414,25 @@ def score_single_turn_response(
     decode_score = sum(float(parsed.decode_success) for parsed in result.parsed) / max(
         1, len(result.parsed)
     )
-    agent_action_validity = []
-    ownership_validity = []
+    strict_json_score = sum(float(parsed.strict_json) for parsed in result.parsed) / max(
+        1, len(result.parsed)
+    )
+    schema_valid_score = sum(
+        float(parsed.schema_valid) for parsed in result.parsed
+    ) / max(1, len(result.parsed))
+    agent_id_match_score = sum(
+        float(parsed.agent_id_match) for parsed in result.parsed
+    ) / max(1, len(result.parsed))
+    capacity_valid_score = sum(
+        float(parsed.capacity_valid) for parsed in result.parsed
+    ) / max(1, len(result.parsed))
+    agent_action_validity: List[float] = []
+    agent_recoverable_action_validity: List[float] = []
+    agent_soft_action_validity: List[float] = []
+    ownership_validity: List[float] = []
+    ownership_precision_scores: List[float] = []
+    count_fidelity_scores: List[float] = []
+    item_acceptance_scores: List[float] = []
     for agent_idx, (parsed, count, assignments) in enumerate(
         zip(
             result.parsed,
@@ -398,7 +443,49 @@ def score_single_turn_response(
         owned = owned_slots(agent_idx, days) if agent_idx < 2 else set()
         ownership_valid = bool(owned) and set(assignments).issubset(owned)
         expected_count = len(owned)
+        owned_assignment_count = sum(slot in owned for slot in assignments)
+        ownership_precision = (
+            owned_assignment_count / count if count > 0 else 0.0
+        )
+        count_fidelity = _clamp(
+            1.0 - abs(count - expected_count) / max(1, expected_count),
+            0.0,
+            1.0,
+        )
+        item_acceptance = (
+            count / parsed.raw_item_count if parsed.raw_item_count > 0 else 0.0
+        )
+        recoverable_action_valid = bool(
+            parsed.decode_success
+            and parsed.schema_valid
+            and parsed.agent_id_match
+            and parsed.capacity_valid
+            and ownership_valid
+            and count == expected_count
+            and count == parsed.raw_item_count
+        )
+
+        # Strict JSON is deliberately excluded from this dense score.  A fully
+        # recoverable action with a harmless prefix should retain its plan
+        # learning signal, while ``parse_weight`` and the exact-match bonus
+        # still make the strictly formatted action preferable.
+        soft_action_validity = float(parsed.decode_success) * (
+            float(parsed.schema_valid)
+            + float(parsed.agent_id_match)
+            + float(parsed.capacity_valid)
+            + ownership_precision
+            + count_fidelity
+            + item_acceptance
+        ) / 6.0
+
         ownership_validity.append(float(ownership_valid))
+        ownership_precision_scores.append(float(ownership_precision))
+        count_fidelity_scores.append(float(count_fidelity))
+        item_acceptance_scores.append(float(item_acceptance))
+        agent_recoverable_action_validity.append(
+            float(recoverable_action_valid)
+        )
+        agent_soft_action_validity.append(float(soft_action_validity))
         agent_action_validity.append(
             float(
                 parsed.parse_success
@@ -410,6 +497,16 @@ def score_single_turn_response(
     action_validity_score = sum(agent_action_validity) / max(
         1, len(agent_action_validity)
     )
+    recoverable_action_validity_score = sum(
+        agent_recoverable_action_validity
+    ) / max(1, len(agent_recoverable_action_validity))
+    soft_action_validity_score = sum(agent_soft_action_validity) / max(
+        1, len(agent_soft_action_validity)
+    )
+    ownership_validity_score = sum(ownership_validity) / max(
+        1, len(ownership_validity)
+    )
+    team_soft_action_validity = _harmonic_mean(agent_soft_action_validity)
     raw_coverage_score = len(result.covered_slots) / total_slots
 
     all_similarities = []
@@ -520,13 +617,34 @@ def score_single_turn_response(
     spurious_fill_rate = spurious_fill_count / max(1, empty_gold_slots)
     exact_match = exact_slots == total_slots and not result.conflict_slots
     team_action_valid = bool(agent_action_validity) and all(agent_action_validity)
-    cooperation_gate = (
-        cfg.cooperation_floor
-        + (1.0 - cfg.cooperation_floor) * float(team_action_valid)
-    ) * (
-        cfg.cooperation_floor
-        + (1.0 - cfg.cooperation_floor) * cooperative_contribution
+    team_recoverable_action_valid = bool(agent_recoverable_action_validity) and all(
+        agent_recoverable_action_validity
     )
+    gate_weight = _clamp(cfg.validity_gate_weight, 0.0, 1.0)
+    gate_floor = _clamp(cfg.cooperation_floor, 0.0, 1.0)
+    validity_gate = gate_floor + (
+        1.0 - gate_floor
+    ) * team_soft_action_validity
+    contribution_gate = gate_floor + (
+        1.0 - gate_floor
+    ) * cooperative_contribution
+    if gate_weight <= 0.0:
+        joint_gate_signal = cooperative_contribution
+    elif gate_weight >= 1.0:
+        joint_gate_signal = team_soft_action_validity
+    elif team_soft_action_validity <= 0.0 or cooperative_contribution <= 0.0:
+        joint_gate_signal = 0.0
+    else:
+        joint_gate_signal = (
+            team_soft_action_validity ** gate_weight
+            * cooperative_contribution ** (1.0 - gate_weight)
+        )
+    # Use one floor after combining the two continuous signals.  The previous
+    # product of two separately floored gates could shrink the plan reward to
+    # 0.04 solely because one strict-format bit was false.
+    cooperation_gate = gate_floor + (
+        1.0 - gate_floor
+    ) * joint_gate_signal
     contribution_deficit = 1.0 - cooperative_contribution
 
     plan_score = (
@@ -561,10 +679,27 @@ def score_single_turn_response(
         "rewarded_exact_match": float(exact_match and team_action_valid),
         "parse_success": float(strict_format_score),
         "decode_success": float(decode_score),
+        "strict_json": float(strict_json_score),
+        "schema_valid": float(schema_valid_score),
+        "agent_id_match": float(agent_id_match_score),
+        "capacity_valid": float(capacity_valid_score),
+        "ownership_validity_mean": float(ownership_validity_score),
         "action_validity": float(action_validity_score),
+        "recoverable_action_validity": float(recoverable_action_validity_score),
+        "soft_action_validity": float(soft_action_validity_score),
         "agent_action_validity": agent_action_validity,
+        "agent_recoverable_action_validity": agent_recoverable_action_validity,
+        "agent_soft_action_validity": agent_soft_action_validity,
         "ownership_validity": ownership_validity,
+        "ownership_precision": ownership_precision_scores,
+        "count_fidelity": count_fidelity_scores,
+        "item_acceptance": item_acceptance_scores,
         "team_action_valid": float(team_action_valid),
+        "team_recoverable_action_valid": float(team_recoverable_action_valid),
+        "team_soft_action_validity": float(team_soft_action_validity),
+        "validity_gate": float(validity_gate),
+        "contribution_gate": float(contribution_gate),
+        "joint_gate_signal": float(joint_gate_signal),
         "cooperation_gate": float(cooperation_gate),
         "cooperative_contribution": float(cooperative_contribution),
         "contribution_ratios": contribution_ratios,
@@ -615,6 +750,52 @@ def score_single_turn_response(
         "merged_plan": result.plan,
         "reward_backend": "annotated_plan_reference",
     }
+
+    per_agent_sequences = {
+        "action_validity": agent_action_validity,
+        "recoverable_action_validity": agent_recoverable_action_validity,
+        "soft_action_validity": agent_soft_action_validity,
+        "ownership_validity": ownership_validity,
+        "ownership_precision": ownership_precision_scores,
+        "count_fidelity": count_fidelity_scores,
+        "item_acceptance": item_acceptance_scores,
+        "contribution_ratio": contribution_ratios,
+        "action_contribution_ratio": action_contribution_ratios,
+        "assignment_count": result.agent_assignment_counts,
+    }
+    for metric_name, values in per_agent_sequences.items():
+        for agent_idx, value in enumerate(values):
+            detail[f"agent_{agent_idx}/{metric_name}"] = float(value)
+
+    parser_error_sets = [set(parsed.error_codes) for parsed in result.parsed]
+    detail["parser_error/any"] = sum(
+        float(bool(error_codes)) for error_codes in parser_error_sets
+    ) / max(1, len(parser_error_sets))
+    for error_code in PARSER_ERROR_CODES:
+        detail[f"parser_error/{error_code}"] = sum(
+            float(error_code in error_codes) for error_codes in parser_error_sets
+        ) / max(1, len(parser_error_sets))
+    known_error_codes = set(PARSER_ERROR_CODES)
+    for agent_idx, (parsed, error_codes) in enumerate(
+        zip(result.parsed, parser_error_sets)
+    ):
+        agent_prefix = f"agent_{agent_idx}"
+        detail[f"{agent_prefix}/decode_success"] = float(parsed.decode_success)
+        detail[f"{agent_prefix}/strict_json"] = float(parsed.strict_json)
+        detail[f"{agent_prefix}/schema_valid"] = float(parsed.schema_valid)
+        detail[f"{agent_prefix}/agent_id_match"] = float(parsed.agent_id_match)
+        detail[f"{agent_prefix}/capacity_valid"] = float(parsed.capacity_valid)
+        detail[f"{agent_prefix}/raw_assignment_count"] = float(
+            parsed.raw_item_count
+        )
+        detail[f"{agent_prefix}/parser_error/any"] = float(bool(error_codes))
+        detail[f"{agent_prefix}/parser_error/other"] = float(
+            bool(error_codes - known_error_codes)
+        )
+        for error_code in PARSER_ERROR_CODES:
+            detail[f"{agent_prefix}/parser_error/{error_code}"] = float(
+                error_code in error_codes
+            )
     return float(reward), detail
 
 

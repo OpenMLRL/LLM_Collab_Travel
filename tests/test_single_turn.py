@@ -17,6 +17,10 @@ from single_turn.aggregation import (
 )
 from single_turn.data import normalize_travelplanner_row, partition_rows
 from single_turn.formatting import get_single_turn_formatters
+from single_turn.logger import (
+    aggregate_single_turn_metrics,
+    build_single_turn_eval_logger,
+)
 from single_turn.parsing import parse_assignments
 from single_turn.rewards.single_turn_reward import (
     TravelJointReward,
@@ -413,6 +417,99 @@ class RewardTests(unittest.TestCase):
         self.assertLess(reward, exact_reward)
         self.assertEqual(detail["parse_success"], 0.5)
         self.assertEqual(detail["rewarded_exact_match"], 0.0)
+        self.assertEqual(detail["team_action_valid"], 0.0)
+        self.assertEqual(detail["team_recoverable_action_valid"], 1.0)
+        self.assertEqual(detail["recoverable_action_validity"], 1.0)
+        self.assertEqual(detail["team_soft_action_validity"], 1.0)
+        self.assertEqual(detail["cooperation_gate"], 1.0)
+        self.assertAlmostEqual(reward, 0.975, places=6)
+
+    def test_partial_action_gets_continuous_validity_but_not_recoverable_validity(self):
+        logistics = json.loads(exact_completions()[0])
+        logistics["assignments"].pop()
+        _, detail = score_single_turn_response(
+            [json.dumps(logistics), exact_completions()[1]],
+            batch_item=fixture_item(),
+        )
+        self.assertEqual(detail["agent_0/recoverable_action_validity"], 0.0)
+        self.assertGreater(detail["agent_0/soft_action_validity"], 0.0)
+        self.assertLess(detail["agent_0/soft_action_validity"], 1.0)
+        self.assertGreater(detail["team_soft_action_validity"], 0.0)
+        self.assertLess(detail["team_soft_action_validity"], 1.0)
+
+    def test_grounded_wrong_fill_loses_to_fewer_high_quality_slots(self):
+        item = fixture_item()
+        item["reference_records"] = [
+            {
+                "Description": "Attractions in Beta",
+                "Content": "Museum; Park; Zoo",
+            },
+            {
+                "Description": "Restaurants in Beta",
+                "Content": "Cafe; Bistro; Diner; Brunch",
+            },
+            {
+                "Description": "Accommodations in Beta",
+                "Content": "Hotel; Motel",
+            },
+            {
+                "Description": "Flight Alpha Beta",
+                "Content": "F100 Alpha Beta; F200 Alpha Beta",
+            },
+        ]
+        fully_covered_but_wrong = [
+            completion(
+                0,
+                [
+                    assignment(1, "current_city", "from Alpha to Beta"),
+                    assignment(1, "transportation", "Flight Number: F200"),
+                    assignment(1, "accommodation", "Motel"),
+                ],
+            ),
+            completion(
+                1,
+                [
+                    assignment(1, "breakfast", "-"),
+                    assignment(1, "attraction", "Park"),
+                    assignment(1, "lunch", "Diner"),
+                    assignment(1, "dinner", "Brunch"),
+                ],
+            ),
+        ]
+        mostly_correct = json.loads(exact_completions()[1])
+        mostly_correct["assignments"][-1]["value"] = "-"
+        fewer_high_quality = [
+            exact_completions()[0],
+            json.dumps(mostly_correct),
+        ]
+
+        wrong_reward, wrong_detail = score_single_turn_response(
+            fully_covered_but_wrong,
+            batch_item=item,
+        )
+        quality_reward, quality_detail = score_single_turn_response(
+            fewer_high_quality,
+            batch_item=item,
+        )
+
+        self.assertGreater(wrong_detail["coverage"], quality_detail["coverage"])
+        self.assertLess(
+            wrong_detail["slot_quality"], quality_detail["slot_quality"]
+        )
+        self.assertLess(wrong_reward, quality_reward)
+
+    def test_parser_diagnostics_are_dense_per_agent_scalars(self):
+        malformed = "One extra line.\n" + exact_completions()[0]
+        _, detail = score_single_turn_response(
+            [malformed, exact_completions()[1]],
+            batch_item=fixture_item(),
+        )
+        self.assertEqual(detail["agent_0/decode_success"], 1.0)
+        self.assertEqual(detail["agent_0/strict_json"], 0.0)
+        self.assertEqual(detail["agent_0/parser_error/not_strict_json"], 1.0)
+        self.assertEqual(detail["agent_1/parser_error/not_strict_json"], 0.0)
+        self.assertEqual(detail["agent_0/parser_error/decode_failed"], 0.0)
+        self.assertEqual(detail["parser_error/not_strict_json"], 0.5)
 
     def test_short_substring_cannot_exploit_grounding(self):
         logistics = [
@@ -452,6 +549,38 @@ class RewardTests(unittest.TestCase):
         self.assertIsInstance(rewards[0], float)
         self.assertAlmostEqual(rewards[0], expected, places=6)
         self.assertAlmostEqual(reward_model.last_details[0]["reward"], expected)
+
+
+class LoggerTests(unittest.TestCase):
+    def test_eval_logger_emits_per_agent_parser_and_validity_metrics(self):
+        item = fixture_item()
+        malformed = "One extra line.\n" + exact_completions()[0]
+        logger = build_single_turn_eval_logger([item])
+        metrics = logger(
+            [
+                [[malformed]],
+                [[exact_completions()[1]]],
+            ],
+            test_cases=[""],
+            entry_points=[""],
+            prompts=[item["prompt"]],
+        )
+        self.assertEqual(len(metrics), 1)
+        sample = metrics[0]
+        self.assertEqual(sample["turn_1/team_action_valid"], 0.0)
+        self.assertEqual(sample["turn_1/team_recoverable_action_valid"], 1.0)
+        self.assertEqual(sample["turn_1/agent_0/strict_json"], 0.0)
+        self.assertEqual(
+            sample["turn_1/agent_0/parser_error/not_strict_json"], 1.0
+        )
+        self.assertEqual(
+            sample["turn_1/agent_1/parser_error/not_strict_json"], 0.0
+        )
+        aggregate = aggregate_single_turn_metrics(metrics)
+        self.assertEqual(aggregate["turn_1/team_action_valid"], 0.0)
+        self.assertEqual(
+            aggregate["turn_1/agent_0/parser_error/not_strict_json"], 1.0
+        )
 
 
 class DataAndPromptTests(unittest.TestCase):

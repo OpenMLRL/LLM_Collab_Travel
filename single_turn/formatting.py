@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from single_turn.aggregation import PLAN_FIELDS, assignment_capacity, owned_slots
+from single_turn.structured_generation import (
+    DEFAULT_SYSTEM_PROMPT,
+    wrap_formatter_with_chat_template,
+)
 
 
 def _role_instruction(agent_idx: int, role_mode: str, days: int) -> str:
@@ -165,6 +169,9 @@ STRICT OUTPUT CONTRACT:
   {{"agent_id": {agent_idx}, "assignments": [
 - Your response must end exactly with this character sequence:
   ]}}
+
+Output the JSON object now. The first generated character must be "{{". Stop
+immediately after its matching closing "}}".
 """
 
     return formatter
@@ -174,12 +181,29 @@ def get_single_turn_formatters(
     *,
     num_agents: int,
     role_mode: str = "partitioned_roles",
+    tokenizers: Optional[Sequence[Any]] = None,
+    use_chat_template: bool = False,
+    system_prompt: Optional[str] = DEFAULT_SYSTEM_PROMPT,
 ) -> List[Callable[[Dict[str, Any]], str]]:
-    return [
+    formatters = [
         build_single_turn_formatter(
             agent_idx,
             num_agents=num_agents,
             role_mode=role_mode,
         )
         for agent_idx in range(num_agents)
+    ]
+    if not use_chat_template:
+        return formatters
+    if tokenizers is None or len(tokenizers) != num_agents:
+        raise ValueError(
+            "use_chat_template=true requires exactly one tokenizer per agent."
+        )
+    return [
+        wrap_formatter_with_chat_template(
+            formatter,
+            tokenizers[agent_idx],
+            system_prompt=system_prompt,
+        )
+        for agent_idx, formatter in enumerate(formatters)
     ]
