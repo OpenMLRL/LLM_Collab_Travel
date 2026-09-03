@@ -21,12 +21,50 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         chat_formatted_prompts: bool = False,
         force_json_prefix: bool = True,
         stop_after_complete_json: bool = True,
+        rotate_eval_subset: bool = False,
         **kwargs: Any,
     ):
         self.chat_formatted_prompts = bool(chat_formatted_prompts)
         self.force_json_prefix = bool(force_json_prefix)
         self.stop_after_complete_json = bool(stop_after_complete_json)
+        self.rotate_eval_subset = bool(rotate_eval_subset)
+        self._eval_cursor = 0
         super().__init__(*args, **kwargs)
+
+    def evaluate(self, num_eval_samples: Optional[int] = None) -> Dict[str, float]:
+        """Evaluate a cyclic held-out shard while leaving stock MAGRPO untouched."""
+
+        if not self.rotate_eval_subset or self.eval_dataset is None:
+            return super().evaluate(num_eval_samples=num_eval_samples)
+        try:
+            dataset_size = len(self.eval_dataset)
+        except TypeError:
+            return super().evaluate(num_eval_samples=num_eval_samples)
+        if dataset_size < 1:
+            return super().evaluate(num_eval_samples=num_eval_samples)
+
+        sample_count = int(
+            self.args.eval_num_samples if num_eval_samples is None else num_eval_samples
+        )
+        if sample_count < 1:
+            raise ValueError("num_eval_samples must be positive for rotating eval.")
+        cursor = self._eval_cursor % dataset_size
+        original_dataset = self.eval_dataset
+        self.eval_dataset = [
+            original_dataset[(cursor + offset) % dataset_size]
+            for offset in range(dataset_size)
+        ]
+        try:
+            metrics = super().evaluate(num_eval_samples=sample_count)
+        except Exception:
+            raise
+        else:
+            self._eval_cursor = (
+                cursor + min(sample_count, dataset_size)
+            ) % dataset_size
+            return metrics
+        finally:
+            self.eval_dataset = original_dataset
 
     def _resolve_prompts(
         self,
@@ -147,9 +185,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         for seq_idx, raw_tokens in enumerate(source_tokens):
             generated_tokens = raw_tokens[base_slice_offset:]
             resolved_length = (
-                completed_lengths[seq_idx]
-                if seq_idx < len(completed_lengths)
-                else None
+                completed_lengths[seq_idx] if seq_idx < len(completed_lengths) else None
             )
             if resolved_length is None:
                 resolved_length = int(generated_tokens.numel())

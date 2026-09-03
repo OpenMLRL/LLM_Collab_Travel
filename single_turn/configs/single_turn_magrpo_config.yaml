@@ -15,10 +15,27 @@ agents: null
 
 dataset:
   name: osunlp/TravelPlanner
-  config_name: train
-  source_split: train
-  train_samples: 40
-  eval_samples: 5
+  revision: 8736504ecfc31b7f8b7e40122873c337e83fff7c
+  # This is a custom curriculum split, not the official validation protocol.
+  # Keep only the four simplest scalable cells: 3/5 days x easy/medium. This
+  # excludes every hard, 7-day, and 3-city query while retaining enough data.
+  config_name: validation
+  source_split: validation
+  filters:
+    days: [3, 5]
+    levels: [easy, medium]
+    visiting_city_numbers: [1, 2]
+    # These filters produce exactly 80 rows with reference contexts no longer
+    # than 35,838 characters at the pinned revision.
+    select_shortest: 80
+    max_reference_chars: null
+  partition:
+    stratify_by: [days, level]
+    # Order held-out rows as five balanced four-example panels so cyclic eval
+    # sees one example from every stratum on every call.
+    interleave_eval: true
+  train_samples: 60
+  eval_samples: 20
 
 seed: 42
 
@@ -41,28 +58,20 @@ travel:
 
 travel_reward:
   parse_weight: 0.05
-  # Prefer choosing the right itinerary entries over merely filling every slot.
-  coverage_weight: 0.20
-  slot_quality_weight: 0.45
-  grounding_weight: 0.0
-  empty_match_weight: 0.05
-  balance_weight: 0.15
-  role_weight: 0.10
-  exact_bonus: 0.20
+  # These five reference/constraint terms sum to 1.0 before the joint gate.
+  assignment_coverage_weight: 0.10
+  required_grounded_weight: 0.15
+  grounding_f1_weight: 0.15
+  commonsense_weight: 0.35
+  hard_constraint_weight: 0.25
+  final_success_bonus: 0.10
   cooperation_floor: 0.20
-  # Equal-weight geometric blend of continuous protocol validity and semantic
-  # contribution. Strict team validity remains an exact-match bonus condition.
-  validity_gate_weight: 0.50
-  overlap_penalty: 0.15
-  conflict_penalty: 0.30
-  lazy_agent_penalty: 0.25
-  invalid_slot_penalty: 0.15
-  extra_assignment_penalty: 0.25
-  self_duplicate_penalty: 0.15
-  empty_mismatch_penalty: 0.25
-  spurious_fill_penalty: 0.15
+  overlap_penalty: 0.10
+  conflict_penalty: 0.20
+  invalid_action_penalty: 0.10
+  contribution_deficit_penalty: 0.15
   min_reward: -0.5
-  max_reward: 1.2
+  max_reward: 1.15
 
 magrpo:
   parallel_training: mp
@@ -71,9 +80,9 @@ magrpo:
   - cuda:1
   num_agents: 2
   num_turns: 1
-  # 40 prompts x 32 epochs x 4 aligned generations = 5120 env steps,
-  # matching the current BFCL native-parallel MAGRPO configuration.
-  num_train_epochs: 32
+  # 60 prompts x 21 epochs x 4 aligned generations = 5040 env steps, within
+  # 1.6% of the current BFCL native-parallel MAGRPO budget (5120).
+  num_train_epochs: 21
   agent_learning_rate: 2.0e-05
   logging_steps: 20
   num_generations: 4
@@ -85,10 +94,12 @@ magrpo:
   train_batch_size: 4
   advantage_normalization: true
   advantage_mode: mean
-  # The trainer interprets this as a within-epoch batch interval. With 40 rows,
-  # 40 means one evaluation at the start of each epoch instead of five.
-  eval_interval: 40
-  eval_num_samples: 5
+  # Evaluate one balanced four-row panel at the start of each epoch. Five calls
+  # cover all 20 held-out rows; the terminal evaluation uses the full pool.
+  eval_interval: 60
+  eval_num_samples: 4
+  rotate_eval_subset: true
+  final_eval_num_samples: 20
   eval_batch_size: 1
   eval_at_end: true
   reference_kl_enabled: false
@@ -104,7 +115,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-partitioned-v3
+  name: Travel-magrpo-qwen3-4b-reference-constraints-v4-60train
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -113,5 +124,6 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
-  - reward-v3
+  - reward-v4-reference-constraints
+  - validation-simple-60train-20eval
   - structured-json

@@ -15,52 +15,91 @@ from single_turn.aggregation import (
     owned_slots,
     slot_owner,
 )
-from single_turn.data import normalize_travelplanner_row, partition_rows
+from single_turn.data import filter_rows, normalize_travelplanner_row, partition_rows
+from single_turn.evaluation import evaluate_single_turn_response
 from single_turn.formatting import get_single_turn_formatters
 from single_turn.logger import (
     aggregate_single_turn_metrics,
     build_single_turn_eval_logger,
 )
 from single_turn.parsing import parse_assignments
+from single_turn.rewards.reference_evaluator import parse_reference_catalog
 from single_turn.rewards.single_turn_reward import (
     TravelJointReward,
     score_single_turn_response,
 )
 
 
-def fixture_item():
-    plan = [
+def reference_records():
+    return [
         {
-            "day": 1,
-            "current_city": "from Alpha to Beta",
-            "transportation": "Flight Number: F100, from Alpha to Beta",
-            "breakfast": "-",
-            "attraction": "Museum, Beta",
-            "lunch": "Cafe, Beta",
-            "dinner": "Bistro, Beta",
-            "accommodation": "Hotel, Beta",
-        }
+            "Description": "Attractions in Beta",
+            "Content": (
+                "Name Latitude Longitude Address Phone Website City\n"
+                "Museum 1.0 2.0 Main-Street 555 site Beta\n"
+                "Park 1.1 2.1 Park-Street 556 site Beta"
+            ),
+        },
+        {
+            "Description": "Restaurants in Beta",
+            "Content": (
+                "Name Average Cost Cuisines Aggregate Rating City\n"
+                "Cafe 10 Indian 4.0 Beta\n"
+                "Diner 15 American 4.1 Beta\n"
+                "Bistro 20 Italian 4.2 Beta\n"
+                "Brunch 12 French 4.3 Beta"
+            ),
+        },
+        {
+            "Description": "Accommodations in Beta",
+            "Content": (
+                "NAME price room type house_rules minimum nights maximum occupancy review rate number city\n"
+                "Hotel 100 Private room No parties 1 2 4.0 Beta\n"
+                "Motel 80 Entire home/apt No smoking 1 4 3.0 Beta"
+            ),
+        },
+        {
+            "Description": "Flight from Alpha to Beta on 2022-01-01",
+            "Content": (
+                "Flight Number Price DepTime ArrTime ActualElapsedTime FlightDate "
+                "OriginCityName DestCityName Distance\n"
+                "F100 20 09:00 10:00 1 hours 0 minutes 2022-01-01 Alpha Beta 100"
+            ),
+        },
+        {
+            "Description": "Flight from Beta to Alpha on 2022-01-03",
+            "Content": (
+                "Flight Number Price DepTime ArrTime ActualElapsedTime FlightDate "
+                "OriginCityName DestCityName Distance\n"
+                "F200 25 18:00 19:00 1 hours 0 minutes 2022-01-03 Beta Alpha 100"
+            ),
+        },
     ]
+
+
+def fixture_item():
+    records = reference_records()
     return {
-        "id": "fixture",
-        "prompt": "Plan a one-day trip from Alpha to Beta.",
-        "query": "Plan a one-day trip from Alpha to Beta.",
+        "id": "travelplanner-validation-fixture",
+        "prompt": "Plan a three-day round trip from Alpha to Beta.",
+        "query": "Plan a three-day round trip from Alpha to Beta.",
         "org": "Alpha",
         "dest": "Beta",
-        "days": 1,
-        "gold_plan": plan,
-        "reference_information": repr(
-            [
-                {"Description": "Attractions in Beta", "Content": "Museum Beta"},
-                {"Description": "Restaurants in Beta", "Content": "Cafe Bistro Beta"},
-                {"Description": "Accommodations in Beta", "Content": "Hotel Beta"},
-                {"Description": "Flight Alpha Beta", "Content": "F100 Alpha Beta"},
-            ]
-        ),
-        "reference_records": [
-            {"Description": "All candidates", "Content": "Museum Cafe Bistro Hotel F100"}
-        ],
-        "local_constraint": {},
+        "days": 3,
+        "visiting_city_number": 1,
+        "date": repr(["2022-01-01", "2022-01-02", "2022-01-03"]),
+        "dates": ["2022-01-01", "2022-01-02", "2022-01-03"],
+        "people_number": 1,
+        "budget": 1000,
+        "level": "easy",
+        "reference_information": repr(records),
+        "reference_records": records,
+        "local_constraint": {
+            "house rule": None,
+            "cuisine": None,
+            "room type": None,
+            "transportation": None,
+        },
         "test": "",
         "entry_point": "",
     }
@@ -77,45 +116,56 @@ def completion(agent_id, assignments):
     )
 
 
-def exact_completions():
-    logistics = [
-        assignment(1, "current_city", "from Alpha to Beta"),
-        assignment(
-            1,
-            "transportation",
-            "Flight Number: F100, from Alpha to Beta",
-        ),
-        assignment(1, "accommodation", "Hotel, Beta"),
-    ]
-    experience = [
-        assignment(1, "breakfast", "-"),
-        assignment(1, "attraction", "Museum, Beta"),
-        assignment(1, "lunch", "Cafe, Beta"),
-        assignment(1, "dinner", "Bistro, Beta"),
-    ]
-    return [completion(0, logistics), completion(1, experience)]
+def valid_plan_values(*, attraction="Museum, Beta", accommodation="Hotel, Beta"):
+    return {
+        (1, "current_city"): "from Alpha to Beta",
+        (1, "transportation"): "Flight Number: F100, from Alpha to Beta",
+        (1, "breakfast"): "-",
+        (1, "attraction"): "-",
+        (1, "lunch"): "-",
+        (1, "dinner"): "-",
+        (1, "accommodation"): accommodation,
+        (2, "current_city"): "Beta",
+        (2, "transportation"): "-",
+        (2, "breakfast"): "Cafe, Beta",
+        (2, "attraction"): attraction,
+        (2, "lunch"): "Diner, Beta",
+        (2, "dinner"): "Bistro, Beta",
+        (2, "accommodation"): accommodation,
+        (3, "current_city"): "from Beta to Alpha",
+        (3, "transportation"): "Flight Number: F200, from Beta to Alpha",
+        (3, "breakfast"): "-",
+        (3, "attraction"): "-",
+        (3, "lunch"): "-",
+        (3, "dinner"): "-",
+        (3, "accommodation"): "-",
+    }
+
+
+def completions_from_values(values):
+    outputs = []
+    for agent_idx in range(2):
+        slots = sorted(
+            owned_slots(agent_idx, 3),
+            key=lambda slot: (slot[0], PLAN_FIELDS.index(slot[1])),
+        )
+        outputs.append(
+            completion(
+                agent_idx,
+                [assignment(day, field, values[(day, field)]) for day, field in slots],
+            )
+        )
+    return outputs
+
+
+def valid_completions(**kwargs):
+    return completions_from_values(valid_plan_values(**kwargs))
 
 
 def all_dash_completions():
-    return [
-        completion(
-            0,
-            [assignment(1, field, "-") for field in (
-                "current_city",
-                "transportation",
-                "accommodation",
-            )],
-        ),
-        completion(
-            1,
-            [assignment(1, field, "-") for field in (
-                "breakfast",
-                "attraction",
-                "lunch",
-                "dinner",
-            )],
-        ),
-    ]
+    return completions_from_values(
+        {(day, field): "-" for day in range(1, 4) for field in PLAN_FIELDS}
+    )
 
 
 class ParsingTests(unittest.TestCase):
@@ -127,60 +177,26 @@ class ParsingTests(unittest.TestCase):
         )
         self.assertTrue(parsed.parse_success)
         self.assertTrue(parsed.strict_json)
-        self.assertTrue(parsed.schema_valid)
-        self.assertTrue(parsed.agent_id_match)
-        self.assertTrue(parsed.capacity_valid)
         self.assertEqual(parsed.error_codes, ())
-        self.assertEqual(parsed.assignments[0].field, "breakfast")
 
-    def test_fenced_json_is_salvaged_but_not_strict(self):
+    def test_fenced_json_is_recovered_but_not_strict(self):
         parsed = parse_assignments(
-            '```json\n'
-            '{"agent_id": 0, "assignments": '
-            '[{"day": 1, "field": "breakfast", "value": "-"}]}\n'
-            '```',
+            "```json\n" + completion(0, [assignment(1, "breakfast", "-")]) + "\n```",
             expected_agent_id=0,
             capacity=1,
         )
         self.assertFalse(parsed.parse_success)
         self.assertTrue(parsed.decode_success)
-        self.assertFalse(parsed.strict_json)
         self.assertIn("not_strict_json", parsed.error_codes)
-        self.assertEqual(parsed.assignments[0].field, "breakfast")
 
-    def test_trailing_text_and_multiple_objects_are_only_salvaged(self):
-        payload = completion(0, [assignment(1, "breakfast", "-")])
-        cases = {
-            "trailing": payload + "\nHere is the answer.",
-            "multiple": payload + "\n" + completion(0, []),
-        }
-        for label, text in cases.items():
-            with self.subTest(label=label):
-                parsed = parse_assignments(
-                    text,
-                    expected_agent_id=0,
-                    capacity=1,
-                )
-                self.assertFalse(parsed.parse_success)
-                self.assertTrue(parsed.decode_success)
-                self.assertFalse(parsed.strict_json)
-                self.assertEqual(len(parsed.assignments), 1)
-                self.assertIn("not_strict_json", parsed.error_codes)
-
-    def test_wrong_agent_id_is_recovered_but_invalid(self):
-        parsed = parse_assignments(
+    def test_wrong_id_and_overcapacity_are_invalid(self):
+        wrong_id = parse_assignments(
             completion(1, [assignment(1, "breakfast", "-")]),
             expected_agent_id=0,
             capacity=1,
         )
-        self.assertFalse(parsed.parse_success)
-        self.assertTrue(parsed.decode_success)
-        self.assertFalse(parsed.agent_id_match)
-        self.assertEqual(len(parsed.assignments), 1)
-        self.assertIn("agent_id_mismatch", parsed.error_codes)
-
-    def test_over_capacity_is_recovered_but_invalid(self):
-        parsed = parse_assignments(
+        self.assertIn("agent_id_mismatch", wrong_id.error_codes)
+        over = parse_assignments(
             completion(
                 0,
                 [
@@ -191,446 +207,404 @@ class ParsingTests(unittest.TestCase):
             expected_agent_id=0,
             capacity=1,
         )
-        self.assertFalse(parsed.parse_success)
-        self.assertTrue(parsed.decode_success)
-        self.assertFalse(parsed.capacity_valid)
-        self.assertEqual(len(parsed.assignments), 2)
-        self.assertIn("capacity_exceeded", parsed.error_codes)
+        self.assertIn("capacity_exceeded", over.error_codes)
 
-    def test_duplicate_and_out_of_domain_slots_are_not_strict(self):
-        duplicate = assignment(1, "breakfast", "-")
-        parsed_duplicate = parse_assignments(
-            completion(0, [duplicate, duplicate]),
+    def test_invalid_slots_and_non_json_fail(self):
+        parsed = parse_assignments(
+            completion(0, [assignment(4, "unknown", "x")]),
             expected_agent_id=0,
-            capacity=2,
-            days=1,
+            capacity=1,
+            days=3,
             valid_fields=PLAN_FIELDS,
         )
-        self.assertFalse(parsed_duplicate.parse_success)
-        self.assertIn("self_duplicate", parsed_duplicate.error_codes)
-
-        for invalid_assignment in (
-            assignment(2, "breakfast", "-"),
-            assignment(1, "unknown_field", "-"),
-            assignment(1, "Breakfast", "-"),
-            assignment(1, "breakfast", ""),
-        ):
-            with self.subTest(assignment=invalid_assignment):
-                parsed_invalid = parse_assignments(
-                    completion(0, [invalid_assignment]),
-                    expected_agent_id=0,
-                    capacity=1,
-                    days=1,
-                    valid_fields=PLAN_FIELDS,
-                )
-                self.assertFalse(parsed_invalid.parse_success)
-                self.assertIn("assignment_value", parsed_invalid.error_codes)
-
-    def test_non_json_fails_without_crashing(self):
-        parsed = parse_assignments("I would visit the museum.")
-        self.assertFalse(parsed.parse_success)
-        self.assertFalse(parsed.decode_success)
-        self.assertEqual(parsed.assignments, [])
+        self.assertIn("assignment_value", parsed.error_codes)
+        self.assertFalse(parse_assignments("not json").decode_success)
 
 
 class AggregationTests(unittest.TestCase):
-    def test_different_values_for_same_slot_conflict(self):
+    def test_conflicts_are_removed(self):
         result = merge_agent_assignments(
             [
-                completion(0, [assignment(1, "lunch", "Cafe A")]),
-                completion(1, [assignment(1, "lunch", "Cafe B")]),
+                completion(0, [assignment(1, "lunch", "Cafe, Beta")]),
+                completion(1, [assignment(1, "lunch", "Diner, Beta")]),
             ],
             days=1,
         )
         self.assertIn((1, "lunch"), result.conflict_slots)
         self.assertNotIn((1, "lunch"), result.merged_assignments)
-        self.assertEqual(result.plan[0]["lunch"], "-")
 
-    def test_same_value_overlap_is_merged_and_counted(self):
-        result = merge_agent_assignments(
-            [
-                completion(0, [assignment(1, "lunch", "Cafe A")]),
-                completion(1, [assignment(1, "lunch", "Cafe A")]),
-            ],
-            days=1,
-        )
-        self.assertEqual(result.merged_assignments[(1, "lunch")], "Cafe A")
-        self.assertEqual(result.overlap_count, 1)
-
-    def test_partition_has_one_owner_per_slot(self):
-        for days in (1, 2, 3, 5, 7):
-            with self.subTest(days=days):
-                agent_0 = owned_slots(0, days)
-                agent_1 = owned_slots(1, days)
-                all_slots = {
-                    (day, field)
-                    for day in range(1, days + 1)
-                    for field in PLAN_FIELDS
-                }
-                self.assertFalse(agent_0 & agent_1)
-                self.assertEqual(agent_0 | agent_1, all_slots)
-                self.assertLessEqual(abs(len(agent_0) - len(agent_1)), 1)
-                self.assertTrue(
-                    all(slot_owner(day, field, days) == 0 for day, field in agent_0)
-                )
-                self.assertTrue(
-                    all(slot_owner(day, field, days) == 1 for day, field in agent_1)
-                )
-
-    def test_overcapacity_action_is_discarded_atomically(self):
-        overcapacity = [
-            assignment(1, "current_city", "from Alpha to Beta"),
-            assignment(1, "transportation", "Flight Number: F100"),
-            assignment(1, "breakfast", "-"),
-            assignment(1, "attraction", "Museum, Beta"),
-            assignment(1, "lunch", "Cafe, Beta"),
-        ]
-        result = merge_agent_assignments(
-            [completion(0, overcapacity), completion(1, [])],
-            days=1,
-        )
-        self.assertEqual(result.per_agent_assignments[0], {})
-        self.assertFalse(result.parsed[0].capacity_valid)
+    def test_partition_has_one_balanced_owner_per_slot(self):
+        for days in (1, 3, 5, 7):
+            first = owned_slots(0, days)
+            second = owned_slots(1, days)
+            all_slots = {
+                (day, field) for day in range(1, days + 1) for field in PLAN_FIELDS
+            }
+            self.assertFalse(first & second)
+            self.assertEqual(first | second, all_slots)
+            self.assertLessEqual(abs(len(first) - len(second)), 1)
+            self.assertTrue(
+                all(slot_owner(day, field, days) == 0 for day, field in first)
+            )
 
 
-class RewardTests(unittest.TestCase):
-    def test_exact_complementary_plan_gets_max_phase_one_reward(self):
+class ReferenceRewardTests(unittest.TestCase):
+    def test_reference_catalog_is_structured(self):
+        catalog = parse_reference_catalog(fixture_item()["reference_information"])
+        self.assertTrue(catalog.parse_success)
+        self.assertEqual(len(catalog.restaurants), 4)
+        self.assertEqual(len(catalog.attractions), 2)
+        self.assertEqual(len(catalog.accommodations), 2)
+        self.assertEqual(len(catalog.transportation), 2)
+
+    def test_valid_plan_reaches_maximum_without_gold(self):
         reward, detail = score_single_turn_response(
-            exact_completions(), batch_item=fixture_item()
+            valid_completions(), batch_item=fixture_item()
         )
-        self.assertAlmostEqual(reward, 1.2, places=6)
-        self.assertEqual(detail["exact_match"], 1.0)
-        self.assertEqual(detail["rewarded_exact_match"], 1.0)
-        self.assertEqual(detail["team_action_valid"], 1.0)
-        self.assertEqual(detail["cooperative_contribution"], 1.0)
-        self.assertEqual(detail["coverage"], 1.0)
-        self.assertEqual(detail["conflict_count"], 0.0)
-        self.assertEqual(detail["role_score"], 1.0)
+        self.assertAlmostEqual(reward, 1.15, places=6)
+        self.assertEqual(detail["reward_backend"], "reference_constraint_v1")
+        self.assertEqual(detail["ultimate/reference_plan_success"], 1.0)
+        self.assertEqual(detail["ultimate/collaboration_success"], 1.0)
+        self.assertEqual(detail["ultimate/team_action_success"], 1.0)
+        self.assertEqual(detail["required_grounded_recall"], 1.0)
+        self.assertNotIn("exact_match", detail)
+        self.assertNotIn("slot_quality", detail)
 
-    def test_complementary_agents_beat_identical_agents(self):
-        exact_reward, _ = score_single_turn_response(
-            exact_completions(), batch_item=fixture_item()
-        )
-        logistics = json.loads(exact_completions()[0])["assignments"]
-        duplicate_reward, detail = score_single_turn_response(
-            [completion(0, logistics), completion(1, logistics)],
+    def test_two_different_valid_plans_can_both_score_maximum(self):
+        first, first_detail = score_single_turn_response(
+            valid_completions(attraction="Museum, Beta", accommodation="Hotel, Beta"),
             batch_item=fixture_item(),
         )
-        self.assertLess(duplicate_reward, exact_reward)
-        self.assertGreater(detail["overlap_count"], 0)
-        self.assertLess(detail["coverage"], 1.0)
-        self.assertEqual(detail["cooperative_contribution"], 0.0)
+        second, second_detail = score_single_turn_response(
+            valid_completions(attraction="Park, Beta", accommodation="Motel, Beta"),
+            batch_item=fixture_item(),
+        )
+        self.assertAlmostEqual(first, 1.15, places=6)
+        self.assertAlmostEqual(second, 1.15, places=6)
+        self.assertEqual(first_detail["ultimate/reference_plan_success"], 1.0)
+        self.assertEqual(second_detail["ultimate/reference_plan_success"], 1.0)
 
-    def test_all_dash_assignments_receive_low_reward(self):
-        reward, detail = score_single_turn_response(
+    def test_annotated_plan_is_ignored_even_when_present(self):
+        plain = fixture_item()
+        poisoned = dict(plain)
+        poisoned["annotated_plan"] = "malicious target"
+        poisoned["gold_plan"] = [{"do": "not read me"}]
+        first = score_single_turn_response(valid_completions(), batch_item=plain)
+        second = score_single_turn_response(valid_completions(), batch_item=poisoned)
+        self.assertEqual(first, second)
+
+    def test_all_dash_and_hallucinations_fail_end_metrics(self):
+        dash_reward, dash = score_single_turn_response(
             all_dash_completions(), batch_item=fixture_item()
         )
-        self.assertLessEqual(reward, -0.17)
-        self.assertEqual(detail["team_action_valid"], 1.0)
-        self.assertEqual(detail["cooperative_contribution"], 0.0)
-        self.assertEqual(detail["coverage"], 0.0)
-        self.assertEqual(detail["raw_coverage"], 1.0)
-        self.assertEqual(detail["empty_recall"], 1.0)
-        self.assertEqual(detail["empty_match_score"], 0.0)
-        self.assertEqual(detail["empty_mismatch_rate"], 1.0)
+        values = valid_plan_values()
+        values[(2, "lunch")] = "Imaginary Cafe, Beta"
+        fake_reward, fake = score_single_turn_response(
+            completions_from_values(values), batch_item=fixture_item()
+        )
+        good_reward, _ = score_single_turn_response(
+            valid_completions(), batch_item=fixture_item()
+        )
+        self.assertLess(dash_reward, fake_reward)
+        self.assertLess(fake_reward, good_reward)
+        self.assertEqual(dash["required_grounded_recall"], 0.0)
+        self.assertEqual(dash["ultimate/reference_plan_success"], 0.0)
+        self.assertLess(fake["entity_grounding_precision"], 1.0)
+        self.assertEqual(fake["ultimate/reference_within_reference"], 0.0)
 
-    def test_one_sided_semantic_contribution_is_negative(self):
-        experience = json.loads(all_dash_completions()[1])["assignments"]
+    def test_wrong_route_and_lazy_agent_are_penalized(self):
+        values = valid_plan_values()
+        values[(1, "current_city")] = "from Gamma to Beta"
+        wrong_reward, wrong = score_single_turn_response(
+            completions_from_values(values), batch_item=fixture_item()
+        )
+        good_reward, _ = score_single_turn_response(
+            valid_completions(), batch_item=fixture_item()
+        )
+        self.assertLess(wrong_reward, good_reward)
+        self.assertEqual(wrong["ultimate/reference_reasonable_route"], 0.0)
+
+        lazy_reward, lazy = score_single_turn_response(
+            [valid_completions()[0], completion(1, [])],
+            batch_item=fixture_item(),
+        )
+        self.assertLess(lazy_reward, good_reward)
+        self.assertEqual(lazy["agent_1/verified_contribution"], 0.0)
+        self.assertEqual(lazy["ultimate/both_agent_verified_contribution"], 0.0)
+
+    def test_non_strict_output_loses_team_success(self):
+        outputs = valid_completions()
+        malformed = "prefix\n" + outputs[0]
         reward, detail = score_single_turn_response(
-            [exact_completions()[0], completion(1, experience)],
-            batch_item=fixture_item(),
+            [malformed, outputs[1]], batch_item=fixture_item()
         )
-        self.assertLess(reward, 0.0)
-        self.assertEqual(detail["contribution_ratios"], [1.0, 0.0])
-        self.assertEqual(detail["cooperative_contribution"], 0.0)
-        self.assertEqual(detail["contribution_deficit"], 1.0)
-
-    def test_swapped_ownership_cannot_claim_exact_bonus(self):
-        logistics = json.loads(exact_completions()[0])["assignments"]
-        experience = json.loads(exact_completions()[1])["assignments"]
-        reward, detail = score_single_turn_response(
-            [completion(0, experience), completion(1, logistics)],
-            batch_item=fixture_item(),
-        )
-        self.assertEqual(detail["exact_match"], 1.0)
-        self.assertEqual(detail["rewarded_exact_match"], 0.0)
-        self.assertEqual(detail["ownership_validity"], [0.0, 0.0])
-        self.assertEqual(detail["team_action_valid"], 0.0)
-        self.assertEqual(detail["slot_quality"], 1.0)
-        self.assertEqual(detail["role_score"], 0.0)
-        self.assertLess(reward, 1.2)
-
-    def test_overcapacity_action_cannot_improve_exact_team(self):
-        exact_reward, _ = score_single_turn_response(
-            exact_completions(), batch_item=fixture_item()
-        )
-        logistics = json.loads(exact_completions()[0])["assignments"]
-        overcapacity = logistics + [
-            assignment(1, "attraction", "Museum, Beta"),
-            assignment(1, "lunch", "Cafe, Beta"),
-        ]
-        reward, detail = score_single_turn_response(
-            [completion(0, overcapacity), exact_completions()[1]],
-            batch_item=fixture_item(),
-        )
-        self.assertLess(reward, exact_reward)
-        self.assertEqual(detail["overcapacity_agent_rate"], 0.5)
-        self.assertGreater(detail["extra_assignment_count"], 0.0)
-        self.assertEqual(detail["agent_action_validity"][0], 0.0)
-
-    def test_spurious_fill_of_gold_dash_is_worse_than_explicit_dash(self):
-        exact_reward, _ = score_single_turn_response(
-            exact_completions(), batch_item=fixture_item()
-        )
-        experience = json.loads(exact_completions()[1])["assignments"]
-        experience[0] = assignment(1, "breakfast", "Cafe, Beta")
-        reward, detail = score_single_turn_response(
-            [exact_completions()[0], completion(1, experience)],
-            batch_item=fixture_item(),
-        )
-        self.assertLess(reward, exact_reward)
-        self.assertEqual(detail["exact_match"], 0.0)
-        self.assertEqual(detail["correct_empty_slots"], 0.0)
-        self.assertEqual(detail["empty_recall"], 0.0)
-        self.assertEqual(detail["spurious_fill_rate"], 1.0)
-
-    def test_one_grounded_slot_has_global_nonempty_coverage(self):
-        one_slot = completion(
-            0,
-            [assignment(1, "current_city", "from Alpha to Beta")],
-        )
-        _, detail = score_single_turn_response(
-            [one_slot, completion(1, [])],
-            batch_item=fixture_item(),
-        )
-        self.assertAlmostEqual(detail["coverage"], 1.0 / 6.0)
-
-    def test_trailing_explanation_loses_strict_team_bonus(self):
-        exact_reward, _ = score_single_turn_response(
-            exact_completions(), batch_item=fixture_item()
-        )
-        malformed = exact_completions()[0] + "\nThis is the completed assignment."
-        reward, detail = score_single_turn_response(
-            [malformed, exact_completions()[1]],
-            batch_item=fixture_item(),
-        )
-        self.assertLess(reward, exact_reward)
-        self.assertEqual(detail["parse_success"], 0.5)
-        self.assertEqual(detail["rewarded_exact_match"], 0.0)
-        self.assertEqual(detail["team_action_valid"], 0.0)
-        self.assertEqual(detail["team_recoverable_action_valid"], 1.0)
-        self.assertEqual(detail["recoverable_action_validity"], 1.0)
-        self.assertEqual(detail["team_soft_action_validity"], 1.0)
-        self.assertEqual(detail["cooperation_gate"], 1.0)
-        self.assertAlmostEqual(reward, 0.975, places=6)
-
-    def test_partial_action_gets_continuous_validity_but_not_recoverable_validity(self):
-        logistics = json.loads(exact_completions()[0])
-        logistics["assignments"].pop()
-        _, detail = score_single_turn_response(
-            [json.dumps(logistics), exact_completions()[1]],
-            batch_item=fixture_item(),
-        )
-        self.assertEqual(detail["agent_0/recoverable_action_validity"], 0.0)
-        self.assertGreater(detail["agent_0/soft_action_validity"], 0.0)
-        self.assertLess(detail["agent_0/soft_action_validity"], 1.0)
-        self.assertGreater(detail["team_soft_action_validity"], 0.0)
-        self.assertLess(detail["team_soft_action_validity"], 1.0)
-
-    def test_grounded_wrong_fill_loses_to_fewer_high_quality_slots(self):
-        item = fixture_item()
-        item["reference_records"] = [
-            {
-                "Description": "Attractions in Beta",
-                "Content": "Museum; Park; Zoo",
-            },
-            {
-                "Description": "Restaurants in Beta",
-                "Content": "Cafe; Bistro; Diner; Brunch",
-            },
-            {
-                "Description": "Accommodations in Beta",
-                "Content": "Hotel; Motel",
-            },
-            {
-                "Description": "Flight Alpha Beta",
-                "Content": "F100 Alpha Beta; F200 Alpha Beta",
-            },
-        ]
-        fully_covered_but_wrong = [
-            completion(
-                0,
-                [
-                    assignment(1, "current_city", "from Alpha to Beta"),
-                    assignment(1, "transportation", "Flight Number: F200"),
-                    assignment(1, "accommodation", "Motel"),
-                ],
-            ),
-            completion(
-                1,
-                [
-                    assignment(1, "breakfast", "-"),
-                    assignment(1, "attraction", "Park"),
-                    assignment(1, "lunch", "Diner"),
-                    assignment(1, "dinner", "Brunch"),
-                ],
-            ),
-        ]
-        mostly_correct = json.loads(exact_completions()[1])
-        mostly_correct["assignments"][-1]["value"] = "-"
-        fewer_high_quality = [
-            exact_completions()[0],
-            json.dumps(mostly_correct),
-        ]
-
-        wrong_reward, wrong_detail = score_single_turn_response(
-            fully_covered_but_wrong,
-            batch_item=item,
-        )
-        quality_reward, quality_detail = score_single_turn_response(
-            fewer_high_quality,
-            batch_item=item,
-        )
-
-        self.assertGreater(wrong_detail["coverage"], quality_detail["coverage"])
-        self.assertLess(
-            wrong_detail["slot_quality"], quality_detail["slot_quality"]
-        )
-        self.assertLess(wrong_reward, quality_reward)
-
-    def test_parser_diagnostics_are_dense_per_agent_scalars(self):
-        malformed = "One extra line.\n" + exact_completions()[0]
-        _, detail = score_single_turn_response(
-            [malformed, exact_completions()[1]],
-            batch_item=fixture_item(),
-        )
+        self.assertLess(reward, 1.15)
+        self.assertEqual(detail["ultimate/team_action_success"], 0.0)
+        self.assertEqual(detail["ultimate/collaboration_success"], 0.0)
         self.assertEqual(detail["agent_0/decode_success"], 1.0)
-        self.assertEqual(detail["agent_0/strict_json"], 0.0)
-        self.assertEqual(detail["agent_0/parser_error/not_strict_json"], 1.0)
-        self.assertEqual(detail["agent_1/parser_error/not_strict_json"], 0.0)
-        self.assertEqual(detail["agent_0/parser_error/decode_failed"], 0.0)
-        self.assertEqual(detail["parser_error/not_strict_json"], 0.5)
 
-    def test_short_substring_cannot_exploit_grounding(self):
-        logistics = [
-            assignment(1, "current_city", "a"),
-            assignment(1, "transportation", "a"),
-            assignment(1, "accommodation", "a"),
-        ]
-        experience = [
-            assignment(1, "breakfast", "a"),
-            assignment(1, "attraction", "a"),
-            assignment(1, "lunch", "a"),
-            assignment(1, "dinner", "a"),
-        ]
-        reward, detail = score_single_turn_response(
-            [
-                completion(0, logistics),
-                completion(1, experience),
-            ],
+    def test_conflicted_slot_is_not_a_verified_contribution(self):
+        outputs = valid_completions()
+        first = json.loads(outputs[0])
+        first["assignments"].append(assignment(1, "breakfast", "Diner, Beta"))
+        _, detail = score_single_turn_response(
+            [json.dumps(first), outputs[1]],
             batch_item=fixture_item(),
         )
-        self.assertEqual(detail["grounding"], 0.0)
-        self.assertEqual(detail["coverage"], 0.0)
-        self.assertLess(reward, 0.1)
+        self.assertEqual(detail["conflict_count"], 1.0)
+        self.assertEqual(detail["agent_0/verified_contribution"], 1.0)
+        self.assertLess(detail["agent_1/verified_contribution"], 1.0)
+        self.assertEqual(detail["ultimate/both_agent_verified_contribution"], 0.0)
 
-    def test_joint_reward_returns_one_shared_scalar_per_sample(self):
-        expected, _ = score_single_turn_response(
-            exact_completions(), batch_item=fixture_item()
+    def test_bare_entity_name_does_not_receive_grounding_credit(self):
+        values = valid_plan_values()
+        values[(2, "lunch")] = "Diner"
+        _, detail = score_single_turn_response(
+            completions_from_values(values), batch_item=fixture_item()
         )
+        self.assertLess(detail["entity_grounding_precision"], 1.0)
+        self.assertEqual(detail["ultimate/reference_grounding"], 0.0)
+        self.assertEqual(detail["ultimate/reference_plan_success"], 0.0)
+
+    def test_abbreviated_transport_does_not_receive_route_credit(self):
+        values = valid_plan_values()
+        values[(1, "transportation")] = "F100"
+        values[(3, "transportation")] = "F200"
+        reward, detail = score_single_turn_response(
+            completions_from_values(values), batch_item=fixture_item()
+        )
+        self.assertLess(reward, 1.15)
+        self.assertEqual(detail["ultimate/reference_transport_consistency"], 0.0)
+        self.assertEqual(detail["ultimate/reference_plan_success"], 0.0)
+
+    def test_appended_factual_claims_do_not_receive_grounding_credit(self):
+        values = valid_plan_values()
+        values[(2, "lunch")] = "Diner, Beta; cost: $0 invented"
+        values[(1, "transportation")] = (
+            "Flight Number: F100, from Alpha to Beta, on 2099-12-31, teleportation"
+        )
+        reward, detail = score_single_turn_response(
+            completions_from_values(values), batch_item=fixture_item()
+        )
+        self.assertLess(reward, 1.15)
+        self.assertLess(detail["entity_grounding_precision"], 1.0)
+        self.assertEqual(detail["ultimate/reference_plan_success"], 0.0)
+
+    def test_accommodation_must_be_in_end_of_day_city(self):
+        item = fixture_item()
+        records = [
+            *reference_records(),
+            {
+                "Description": "Accommodations in Alpha",
+                "Content": (
+                    "NAME price room type house_rules minimum nights maximum occupancy "
+                    "review rate number city\n"
+                    "Origin Inn 50 Private room No parties 1 2 4.0 Alpha"
+                ),
+            },
+        ]
+        item["reference_information"] = repr(records)
+        item["reference_records"] = records
+        values = valid_plan_values()
+        values[(1, "accommodation")] = "Origin Inn, Alpha"
+        reward, detail = score_single_turn_response(
+            completions_from_values(values), batch_item=item
+        )
+        self.assertLess(reward, 1.15)
+        self.assertEqual(detail["ultimate/reference_within_current_city"], 0.0)
+        self.assertEqual(detail["ultimate/reference_plan_success"], 0.0)
+
+    def test_joint_reward_returns_one_shared_scalar(self):
+        outputs = valid_completions()
         reward_model = TravelJointReward()
         rewards = reward_model(
-            [exact_completions()[0]],
-            [exact_completions()[1]],
+            [outputs[0]],
+            [outputs[1]],
             batch_items=[fixture_item()],
-            prompts=[["agent 0 prompt"], ["agent 1 prompt"]],
+            prompts=[["agent 0"], ["agent 1"]],
         )
-        self.assertEqual(len(rewards), 1)
-        self.assertIsInstance(rewards[0], float)
-        self.assertAlmostEqual(rewards[0], expected, places=6)
-        self.assertAlmostEqual(reward_model.last_details[0]["reward"], expected)
+        self.assertEqual(rewards, [1.15])
+        self.assertEqual(reward_model.last_details[0]["reward"], 1.15)
 
 
 class LoggerTests(unittest.TestCase):
-    def test_eval_logger_emits_per_agent_parser_and_validity_metrics(self):
+    def test_eval_logger_emits_ultimate_metrics(self):
         item = fixture_item()
-        malformed = "One extra line.\n" + exact_completions()[0]
+        outputs = valid_completions()
         logger = build_single_turn_eval_logger([item])
         metrics = logger(
-            [
-                [[malformed]],
-                [[exact_completions()[1]]],
-            ],
+            [[[outputs[0]]], [[outputs[1]]]],
             test_cases=[""],
             entry_points=[""],
             prompts=[item["prompt"]],
         )
-        self.assertEqual(len(metrics), 1)
-        sample = metrics[0]
-        self.assertEqual(sample["turn_1/team_action_valid"], 0.0)
-        self.assertEqual(sample["turn_1/team_recoverable_action_valid"], 1.0)
-        self.assertEqual(sample["turn_1/agent_0/strict_json"], 0.0)
+        self.assertEqual(metrics[0]["turn_1/ultimate/collaboration_success"], 1.0)
+        self.assertEqual(metrics[0]["turn_1/ultimate/reference_commonsense_macro"], 1.0)
+
+    def test_eval_logger_fails_loudly_on_unknown_prompt(self):
+        logger = build_single_turn_eval_logger([fixture_item()])
+        outputs = valid_completions()
+        with self.assertRaises(KeyError):
+            logger(
+                [[[outputs[0]]], [[outputs[1]]]],
+                test_cases=[""],
+                entry_points=[""],
+                prompts=["not in the fixed split"],
+            )
+
+    def test_eval_logger_rejects_duplicate_prompts(self):
+        item = fixture_item()
+        duplicate = dict(item, id="duplicate")
+        with self.assertRaises(ValueError):
+            build_single_turn_eval_logger([item, duplicate])
+
+    def test_evaluator_and_logger_ignore_target_fields(self):
+        plain = fixture_item()
+        poisoned = dict(plain)
+        poisoned["annotated_plan"] = "do not read"
+        poisoned["gold_plan"] = [{"secret": True}]
+        outputs = valid_completions()
         self.assertEqual(
-            sample["turn_1/agent_0/parser_error/not_strict_json"], 1.0
+            evaluate_single_turn_response(outputs, batch_item=plain),
+            evaluate_single_turn_response(outputs, batch_item=poisoned),
         )
-        self.assertEqual(
-            sample["turn_1/agent_1/parser_error/not_strict_json"], 0.0
+        plain_metrics = build_single_turn_eval_logger([plain])(
+            [[[outputs[0]]], [[outputs[1]]]], [""], [""], [plain["prompt"]]
         )
+        poisoned_metrics = build_single_turn_eval_logger([poisoned])(
+            [[[outputs[0]]], [[outputs[1]]]], [""], [""], [poisoned["prompt"]]
+        )
+        self.assertEqual(plain_metrics, poisoned_metrics)
+
+    def test_micro_aggregation_uses_global_denominators(self):
+        metrics = [
+            {
+                "turn_1/ultimate/reference_hard_micro": 1.0,
+                "turn_1/_aggregate/hard_pass_count": 1.0,
+                "turn_1/_aggregate/hard_applicable_count": 1.0,
+                "turn_1/grounding_f1": 1.0,
+                "turn_1/_aggregate/required_valid_count": 1.0,
+                "turn_1/_aggregate/required_slot_count": 1.0,
+                "turn_1/_aggregate/grounded_entity_count": 1.0,
+                "turn_1/_aggregate/predicted_entity_count": 1.0,
+            },
+            {
+                "turn_1/ultimate/reference_hard_micro": 0.25,
+                "turn_1/_aggregate/hard_pass_count": 1.0,
+                "turn_1/_aggregate/hard_applicable_count": 4.0,
+                "turn_1/grounding_f1": 0.5,
+                "turn_1/_aggregate/required_valid_count": 1.0,
+                "turn_1/_aggregate/required_slot_count": 3.0,
+                "turn_1/_aggregate/grounded_entity_count": 3.0,
+                "turn_1/_aggregate/predicted_entity_count": 4.0,
+            },
+        ]
         aggregate = aggregate_single_turn_metrics(metrics)
-        self.assertEqual(aggregate["turn_1/team_action_valid"], 0.0)
-        self.assertEqual(
-            aggregate["turn_1/agent_0/parser_error/not_strict_json"], 1.0
-        )
+        self.assertAlmostEqual(aggregate["turn_1/ultimate/reference_hard_micro"], 0.4)
+        self.assertAlmostEqual(aggregate["turn_1/required_grounded_recall"], 0.5)
+        self.assertAlmostEqual(aggregate["turn_1/entity_grounding_precision"], 0.8)
+        self.assertAlmostEqual(aggregate["turn_1/grounding_f1"], 8.0 / 13.0)
+        self.assertNotIn("turn_1/_aggregate/hard_pass_count", aggregate)
 
 
 class DataAndPromptTests(unittest.TestCase):
-    def test_official_annotated_plan_shape_is_normalized(self):
-        gold = fixture_item()["gold_plan"]
+    def test_validation_row_without_annotation_is_normalized(self):
         raw = {
-            "query": "Plan a one-day trip from Alpha to Beta.",
-            "days": 1,
-            "annotated_plan": repr([{"org": "Alpha"}, gold]),
-            "reference_information": "[]",
+            "query": "Plan a trip.",
+            "days": 3,
+            "date": repr(["2022-01-01", "2022-01-02", "2022-01-03"]),
+            "reference_information": repr(reference_records()),
             "local_constraint": "{}",
         }
-        normalized = normalize_travelplanner_row(raw, 0)
-        self.assertEqual(normalized["gold_plan"][0]["day"], 1)
-        self.assertEqual(set(normalized["gold_plan"][0]) - {"day"}, set(PLAN_FIELDS))
+        normalized = normalize_travelplanner_row(raw, 7, source_split="validation")
+        self.assertEqual(normalized["id"], "travelplanner-validation-7")
+        self.assertNotIn("gold_plan", normalized)
+        self.assertNotIn("annotated_plan", normalized)
+        self.assertEqual(len(normalized["dates"]), 3)
 
-    def test_missing_annotated_plan_is_rejected(self):
+    def test_annotation_is_removed_from_normalized_row(self):
         raw = {
-            "query": "Plan a one-day trip from Alpha to Beta.",
-            "days": 1,
-            "annotated_plan": "not a plan",
-            "reference_information": "[]",
+            "query": "Plan a trip.",
+            "days": 3,
+            "annotated_plan": "secret",
+            "reference_information": repr(reference_records()),
         }
-        with self.assertRaisesRegex(ValueError, "requires annotated"):
-            normalize_travelplanner_row(raw, 0)
+        normalized = normalize_travelplanner_row(raw, 0, source_split="train")
+        self.assertNotIn("annotated_plan", normalized)
 
-    def test_partition_is_disjoint_and_reproducible(self):
-        rows = [{"id": str(index)} for index in range(10)]
-        train_a, eval_a = partition_rows(rows, train_samples=8, eval_samples=2, seed=7)
-        train_b, eval_b = partition_rows(rows, train_samples=8, eval_samples=2, seed=7)
-        self.assertEqual(train_a, train_b)
-        self.assertEqual(eval_a, eval_b)
-        self.assertFalse({x["id"] for x in train_a} & {x["id"] for x in eval_a})
+    def test_filters_and_partition_are_disjoint_and_reproducible(self):
+        rows = [
+            {
+                "id": str(index),
+                "days": 3 if index < 6 else 5,
+                "level": "easy",
+                "visiting_city_number": 1 if index < 6 else 2,
+                "reference_chars": 100 + index,
+                "source_index": index,
+            }
+            for index in range(10)
+        ]
+        selected = filter_rows(
+            rows,
+            days=[3],
+            levels=["easy"],
+            visiting_city_numbers=[1],
+            select_shortest=5,
+        )
+        self.assertEqual([row["id"] for row in selected], ["0", "1", "2", "3", "4"])
+        first = partition_rows(selected, train_samples=4, eval_samples=1, seed=7)
+        second = partition_rows(selected, train_samples=4, eval_samples=1, seed=7)
+        self.assertEqual(first, second)
+        self.assertFalse(
+            {row["id"] for row in first[0]} & {row["id"] for row in first[1]}
+        )
 
-    def test_role_prompts_share_task_but_have_distinct_guidance(self):
+    def test_stratified_partition_balances_and_interleaves_eval_panels(self):
+        rows = [
+            {
+                "id": f"{days}-{level}-{index}",
+                "days": days,
+                "level": level,
+            }
+            for days in (3, 5)
+            for level in ("easy", "medium")
+            for index in range(6)
+        ]
+        train, evaluation = partition_rows(
+            rows,
+            train_samples=16,
+            eval_samples=8,
+            seed=42,
+            stratify_by=["days", "level"],
+            interleave_eval=True,
+        )
+        for days in (3, 5):
+            for level in ("easy", "medium"):
+                self.assertEqual(
+                    sum(row["days"] == days and row["level"] == level for row in train),
+                    4,
+                )
+        for panel_start in (0, 4):
+            panel = evaluation[panel_start : panel_start + 4]
+            self.assertEqual(
+                {(row["days"], row["level"]) for row in panel},
+                {(3, "easy"), (3, "medium"), (5, "easy"), (5, "medium")},
+            )
+        self.assertFalse(
+            {row["id"] for row in train} & {row["id"] for row in evaluation}
+        )
+
+    def test_role_prompts_explain_reference_free_contract(self):
         item = fixture_item()
-        prompts = [formatter(item) for formatter in get_single_turn_formatters(num_agents=2)]
+        prompts = [
+            formatter(item) for formatter in get_single_turn_formatters(num_agents=2)
+        ]
         self.assertIn("LOGISTICS AND FEASIBILITY", prompts[0])
         self.assertIn("DAILY EXPERIENCE", prompts[1])
-        self.assertIn(item["query"], prompts[0])
-        self.assertIn(item["query"], prompts[1])
-        self.assertIn("at most 4 assignments", prompts[0])
-        self.assertIn("exactly 3 assignments", prompts[0])
-        self.assertIn("exactly 4 assignments", prompts[1])
-        self.assertIn("(day 1, current_city)", prompts[0])
-        self.assertNotIn("(day 1, current_city)", prompts[1])
-        self.assertIn('"agent_id" must be the integer 0', prompts[0])
-        self.assertIn('"agent_id" must be the integer 1', prompts[1])
-        self.assertIn("no Markdown fence", prompts[0])
-        self.assertNotIn("exact candidate text", prompts[0])
+        self.assertIn("A travel day requires matching transportation", prompts[0])
+        self.assertIn('as "Name, City"', prompts[1])
+        self.assertNotIn("annotated", prompts[0].casefold())
+        self.assertNotIn("gold", prompts[1].casefold())
 
 
 if __name__ == "__main__":

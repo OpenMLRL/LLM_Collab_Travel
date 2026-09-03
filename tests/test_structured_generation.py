@@ -74,7 +74,9 @@ class FakeTokenizer:
     def __call__(self, prompts, **kwargs):
         self.last_tokenizer_kwargs = kwargs
         width = max(len(prompt) for prompt in prompts)
-        return SimpleNamespace(input_ids=torch.zeros((len(prompts), width), dtype=torch.long))
+        return SimpleNamespace(
+            input_ids=torch.zeros((len(prompts), width), dtype=torch.long)
+        )
 
 
 class _TinyBatchEncoding:
@@ -175,11 +177,55 @@ class ChatTemplateTests(unittest.TestCase):
     def test_missing_chat_template_fails_loudly(self):
         tokenizer = FakeTokenizer()
         tokenizer.chat_template = None
-        with self.assertRaisesRegex(ValueError, "requires a tokenizer with a chat_template"):
+        with self.assertRaisesRegex(
+            ValueError, "requires a tokenizer with a chat_template"
+        ):
             apply_chat_template(tokenizer, "prompt")
 
 
 class JSONGenerationConstraintTests(unittest.TestCase):
+    def test_rotating_eval_cycles_through_held_out_pool(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        original = [{"id": index} for index in range(5)]
+        trainer.eval_dataset = original
+        trainer.rotate_eval_subset = True
+        trainer._eval_cursor = 0
+        trainer.args = SimpleNamespace(eval_num_samples=2)
+        snapshots = []
+
+        def fake_evaluate(base_trainer, num_eval_samples=None):
+            snapshots.append(
+                [row["id"] for row in base_trainer.eval_dataset[:num_eval_samples]]
+            )
+            return {"count": float(num_eval_samples)}
+
+        with patch.object(MAGRPOTrainer, "evaluate", autospec=True) as evaluate:
+            evaluate.side_effect = fake_evaluate
+            trainer.evaluate(num_eval_samples=2)
+            trainer.evaluate(num_eval_samples=2)
+            trainer.evaluate(num_eval_samples=2)
+            trainer.evaluate(num_eval_samples=5)
+
+        self.assertEqual(snapshots, [[0, 1], [2, 3], [4, 0], [1, 2, 3, 4, 0]])
+        self.assertIs(trainer.eval_dataset, original)
+        self.assertEqual(trainer._eval_cursor, 1)
+
+    def test_rotating_eval_restores_dataset_after_failure(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        original = [{"id": index} for index in range(5)]
+        trainer.eval_dataset = original
+        trainer.rotate_eval_subset = True
+        trainer._eval_cursor = 2
+        trainer.args = SimpleNamespace(eval_num_samples=2)
+
+        with patch.object(
+            MAGRPOTrainer, "evaluate", autospec=True, side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                trainer.evaluate(num_eval_samples=2)
+        self.assertIs(trainer.eval_dataset, original)
+        self.assertEqual(trainer._eval_cursor, 2)
+
     def test_stop_criterion_ignores_braces_and_escapes_inside_strings(self):
         tokenizer = FakeTokenizer()
         criterion = CompleteJSONObjectCriteria(tokenizer, prompt_length=2)
@@ -230,10 +276,10 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 "ok": True,
                 "prompt_input_ids": torch.tensor([[2, 3]]),
                 "completion_input_ids": [
-                    [torch.tensor([ord(char) for char in '\"a\":1}'])]
+                    [torch.tensor([ord(char) for char in '"a":1}'])]
                 ],
                 "completion_attention_mask": [[torch.ones(6)]],
-                "completions": [['\"a\":1}']],
+                "completions": [['"a":1}']],
                 "response_lens": [6],
             },
         ) as generate:
@@ -247,9 +293,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         call_kwargs = generate.call_args.kwargs
         self.assertIn("stopping_criteria", call_kwargs)
-        self.assertEqual(
-            call_kwargs["prompts_override"], ["rendered chat prompt{"]
-        )
+        self.assertEqual(call_kwargs["prompts_override"], ["rendered chat prompt{"])
         self.assertNotIn("prompt_tokenizer_kwargs", call_kwargs)
         self.assertNotIn("response_length_resolver", call_kwargs)
         self.assertIsInstance(

@@ -27,14 +27,14 @@ def _role_instruction(agent_idx: int, role_mode: str, days: int) -> str:
         return (
             "You own LOGISTICS AND FEASIBILITY: current_city, transportation, and "
             "accommodation on every day, plus dinner on even-numbered days. Submit every owned "
-            "slot, including an explicit '-' when the correct value is empty. Do not "
+            "slot, including an explicit '-' when the itinerary convention permits it to be empty. Do not "
             "submit breakfast, attraction, lunch, or odd-day dinner slots owned by Agent 1."
         )
     if role_mode == "partitioned_roles" and agent_idx == 1:
         return (
             "You own DAILY EXPERIENCE: breakfast, attraction, and lunch on every day, "
             "plus dinner on odd-numbered days. Submit every "
-            "owned slot, including an explicit '-' when the correct value is empty. "
+            "owned slot, including an explicit '-' when the itinerary convention permits it to be empty. "
             "Do not submit current_city, transportation, accommodation, or even-day "
             "dinner slots owned by Agent 0."
         )
@@ -129,13 +129,20 @@ COLLABORATION RULES:
 - Same-slot duplication wastes capacity; different values for one slot create a conflict.
 - If a slot should intentionally be empty, explicitly assign the string "-". An omitted
   slot is considered missing, which is different from explicitly assigning "-".
-- Never use "-" merely because you are uncertain; use it only when that itinerary slot
-  is genuinely empty under the TravelPlanner convention.
+- Write current_city as "from A to B" on a travel day and as the single current city on
+  a stay day. The trip starts at the origin, visits the requested number of cities, and
+  returns to the origin on the final day.
+- A travel day requires matching transportation; a stay day uses "-" for transportation.
+- A stay day requires breakfast, attraction, lunch, and dinner. These experience fields
+  may be "-" on a travel day. Accommodation is required on every day except the final
+  return day.
+- Never use "-" merely because you are uncertain. Use it only in the cases above.
 - Use only entities and facts from the TRIP REQUEST, STRUCTURED CONSTRAINTS, and
   REFERENCE INFORMATION.
 - Do not invent prices, flight numbers, restaurants, attractions, or accommodations.
-- Copy complete candidate values rather than abbreviating them. For example, preserve
-  the full flight route and times instead of returning only a flight number.
+- Write restaurants, attractions, and accommodations as "Name, City". Separate multiple
+  attractions with semicolons. Copy a complete transportation candidate, including its
+  mode or flight number and the matching route, rather than returning an abbreviation.
 - Your own section is not scored separately; optimize the final team itinerary.
 
 VALID FIELDS:

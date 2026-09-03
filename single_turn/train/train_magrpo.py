@@ -18,7 +18,7 @@ for path in (COMLRL_ROOT, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from single_turn.aggregation import PLAN_FIELDS, slot_owner
+from single_turn.aggregation import owned_slots
 from single_turn.config import Config, add_config_args, parse_overrides
 from single_turn.data import load_single_turn_datasets
 from single_turn.formatting import get_single_turn_formatters
@@ -27,6 +27,7 @@ from single_turn.logger import (
     build_single_turn_eval_logger,
 )
 from single_turn.rewards import make_reward
+from single_turn.rewards.reference_evaluator import parse_reference_catalog
 from single_turn.rewards.single_turn_reward import score_single_turn_response
 from single_turn.structured_generation import DEFAULT_SYSTEM_PROMPT
 
@@ -59,11 +60,21 @@ def _agent_names(config: Config) -> Optional[List[str]]:
 def _load_data(config: Config):
     return load_single_turn_datasets(
         _resolve_dataset_name(str(config.get("dataset.name"))),
-        config_name=str(config.get("dataset.config_name", "train")),
-        split=str(config.get("dataset.source_split", "train")),
-        train_samples=int(config.get("dataset.train_samples", 40)),
-        eval_samples=int(config.get("dataset.eval_samples", 5)),
+        config_name=str(config.get("dataset.config_name", "validation")),
+        split=str(config.get("dataset.source_split", "validation")),
+        train_samples=int(config.get("dataset.train_samples", 16)),
+        eval_samples=int(config.get("dataset.eval_samples", 4)),
         seed=int(config.get("seed", 42)),
+        days=config.get("dataset.filters.days"),
+        levels=config.get("dataset.filters.levels"),
+        visiting_city_numbers=config.get("dataset.filters.visiting_city_numbers"),
+        max_reference_chars=config.get("dataset.filters.max_reference_chars"),
+        select_shortest=config.get("dataset.filters.select_shortest"),
+        stratify_by=config.get("dataset.partition.stratify_by"),
+        interleave_eval=_bool(
+            config.get("dataset.partition.interleave_eval"), default=False
+        ),
+        revision=config.get("dataset.revision"),
     )
 
 
@@ -105,27 +116,22 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
     }
 
 
-def _gold_completions(batch_item: Dict[str, Any]) -> List[str]:
-    """Build a conflict-free two-agent oracle output for dry-run verification."""
+def _contract_probe_completions(batch_item: Dict[str, Any]) -> List[str]:
+    """Build strict all-empty actions to verify plumbing without a target plan."""
 
-    per_agent = [[], []]
-    for row in batch_item["gold_plan"]:
-        day = int(row["day"])
-        for field in PLAN_FIELDS:
-            assignment = {"day": day, "field": field, "value": row[field]}
-            per_agent[slot_owner(day, field, int(batch_item["days"]))].append(
-                assignment
-            )
-
-    capacity = (len(PLAN_FIELDS) * int(batch_item["days"]) + 1) // 2
-    if any(len(assignments) > capacity for assignments in per_agent):
-        raise AssertionError("Oracle role partition exceeded assignment capacity.")
+    days = int(batch_item["days"])
     return [
         json.dumps(
-            {"agent_id": agent_idx, "assignments": assignments},
+            {
+                "agent_id": agent_idx,
+                "assignments": [
+                    {"day": day, "field": field, "value": "-"}
+                    for day, field in sorted(owned_slots(agent_idx, days))
+                ],
+            },
             ensure_ascii=False,
         )
-        for agent_idx, assignments in enumerate(per_agent)
+        for agent_idx in range(2)
     ]
 
 
@@ -133,7 +139,7 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
     magrpo = config.get_section("magrpo")
     reward_cfg = config.get_section("travel_reward")
     sample = train_rows[0]
-    completions = _gold_completions(sample)
+    completions = _contract_probe_completions(sample)
     reward, details = score_single_turn_response(
         completions,
         batch_item=sample,
@@ -146,6 +152,14 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
         num_agents=int(magrpo.get("num_agents", 2)),
         role_mode=str(config.get("travel.role_mode", "partitioned_roles")),
     )
+    all_rows = [*train_rows, *eval_rows]
+    # Also validate that all held-out prompts can be indexed unambiguously by
+    # the detailed evaluator before any model weights are loaded.
+    build_single_turn_eval_logger(eval_rows)
+    catalog_successes = [
+        parse_reference_catalog(str(row.get("reference_information", ""))).parse_success
+        for row in all_rows
+    ]
     report = {
         "status": "ok",
         "train_rows": len(train_rows),
@@ -156,10 +170,28 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
         "expected_agent_completions": expected_env_steps
         * int(magrpo.get("num_agents", 2)),
         "eval_at_end": _bool(magrpo.get("eval_at_end", True), default=True),
-        "oracle_reward": reward,
-        "oracle_exact_match": details["exact_match"],
-        "oracle_coverage": details["coverage"],
-        "oracle_conflicts": details["conflict_count"],
+        "periodic_eval_samples": int(magrpo.get("eval_num_samples", 4)),
+        "final_eval_samples": int(magrpo.get("final_eval_num_samples", len(eval_rows))),
+        "rotate_eval_subset": _bool(
+            magrpo.get("rotate_eval_subset", False), default=False
+        ),
+        "reward_backend": details["reward_backend"],
+        "reward_range": list(make_reward(reward_cfg).reward_range),
+        "strict_empty_probe_reward": reward,
+        "strict_empty_probe_team_action_valid": details["team_action_valid"],
+        "strict_empty_probe_required_grounded_recall": details[
+            "required_grounded_recall"
+        ],
+        "sample_reference_catalog_counts": details["reference_catalog_counts"],
+        "reference_catalog_success_rows": sum(catalog_successes),
+        "reference_catalog_total_rows": len(catalog_successes),
+        "reference_char_range": [
+            min(int(row["reference_chars"]) for row in all_rows),
+            max(int(row["reference_chars"]) for row in all_rows),
+        ],
+        "source_split": sample["source_split"],
+        "train_source_indices": [row["source_index"] for row in train_rows],
+        "eval_source_indices": [row["source_index"] for row in eval_rows],
         "sample_days": sample["days"],
         "sample_prompt_chars": [len(formatter(sample)) for formatter in formatters],
     }
@@ -185,7 +217,9 @@ def main() -> None:
     magrpo_section = config.get_section("magrpo")
     num_agents = int(magrpo_section.get("num_agents", 2))
     if num_agents != 2:
-        raise ValueError("The initial role-guided TravelPlanner task requires 2 agents.")
+        raise ValueError(
+            "The initial role-guided TravelPlanner task requires 2 agents."
+        )
     if int(magrpo_section.get("num_turns", 1)) != 1:
         raise ValueError("This entrypoint intentionally supports exactly one turn.")
     if str(magrpo_section.get("joint_mode", "aligned")).lower() not in {
@@ -193,6 +227,14 @@ def main() -> None:
         "aligned",
     }:
         raise ValueError("Use joint_mode=aligned to match the BFCL rollout budget.")
+    periodic_eval_samples = int(magrpo_section.get("eval_num_samples", 4))
+    final_eval_samples = int(
+        magrpo_section.get("final_eval_num_samples", len(eval_rows))
+    )
+    if not 1 <= periodic_eval_samples <= len(eval_rows):
+        raise ValueError("magrpo.eval_num_samples must lie within the eval pool.")
+    if not 1 <= final_eval_samples <= len(eval_rows):
+        raise ValueError("magrpo.final_eval_num_samples must lie within the eval pool.")
 
     if args.dry_run:
         _dry_run(config, train_rows, eval_rows)
@@ -257,7 +299,7 @@ def main() -> None:
         ),
         advantage_mode=str(magrpo_section.get("advantage_mode", "mean")),
         eval_interval=int(magrpo_section.get("eval_interval", 40)),
-        eval_num_samples=int(magrpo_section.get("eval_num_samples", 5)),
+        eval_num_samples=int(magrpo_section.get("eval_num_samples", 4)),
         eval_batch_size=int(magrpo_section.get("eval_batch_size", 1)),
         reference_kl_enabled=_bool(
             magrpo_section.get("reference_kl_enabled", False), default=False
@@ -297,9 +339,7 @@ def main() -> None:
         formatters=formatters,
         external_transition=None,
         wandb_config=_wandb_config(config, output_dir, magrpo_section),
-        eval_logger=build_single_turn_eval_logger(
-            eval_rows, reward_config=reward_config
-        ),
+        eval_logger=build_single_turn_eval_logger(eval_rows),
         eval_aggregator=aggregate_single_turn_metrics,
         args=trainer_args,
         chat_formatted_prompts=use_chat_template,
@@ -308,6 +348,9 @@ def main() -> None:
         ),
         stop_after_complete_json=_bool(
             config.get("travel.stop_after_complete_json", True), default=True
+        ),
+        rotate_eval_subset=_bool(
+            magrpo_section.get("rotate_eval_subset", False), default=False
         ),
     )
     if _bool(config.get("agent_model.gradient_checkpointing", True), default=True):
@@ -326,9 +369,7 @@ def main() -> None:
     # additional evaluation at the actual final env step so the W&B curve
     # includes the fully trained policy rather than ending one epoch early.
     if _bool(magrpo_section.get("eval_at_end", True), default=True):
-        trainer.evaluate(
-            num_eval_samples=int(magrpo_section.get("eval_num_samples", 5))
-        )
+        trainer.evaluate(num_eval_samples=final_eval_samples)
 
     if _bool(config.get("output.save_final_model", False)):
         for agent_idx, agent in enumerate(trainer.agents):
