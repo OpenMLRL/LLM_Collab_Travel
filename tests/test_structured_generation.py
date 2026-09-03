@@ -21,6 +21,7 @@ for path in (COMLRL_ROOT, REPO_ROOT):
         sys.path.insert(0, str(path))
 
 from comlrl.trainers.reinforce import MAGRPOTrainer
+from single_turn.formatting import build_agent_json_prefill
 from single_turn.structured_generation import (
     CompleteJSONObjectCriteria,
     apply_chat_template,
@@ -123,10 +124,10 @@ class _TinyGenerationTokenizer:
 
 class _ForceDifferentJSONRows(LogitsProcessor):
     responses = (
-        '"a":1}',
-        '"long":22}',
-        '"x":333}',
-        '"nested":{"k":4}}',
+        '-"}]}',
+        'Beta"}]}',
+        'from A to B"}]}',
+        'quoted \\"x\\""}]}',
     )
 
     def __init__(self, prompt_length):
@@ -260,6 +261,26 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         )
         self.assertEqual(criterion.completed_response_lengths, (7, 9))
 
+    def test_stop_criterion_resumes_from_full_open_value_prefill(self):
+        tokenizer = FakeTokenizer()
+        prefix = build_agent_json_prefill(0, 3)
+        criterion = CompleteJSONObjectCriteria(
+            tokenizer,
+            prompt_length=2,
+            initial_text=prefix,
+        )
+        partial = "from Alpha to Beta"
+        partial_ids = torch.tensor([[1, 2, *map(ord, partial)]])
+        self.assertFalse(criterion(partial_ids, torch.empty(1)).item())
+
+        suffix = partial + '"}]}'
+        complete_ids = torch.tensor([[1, 2, *map(ord, suffix)]])
+        self.assertTrue(criterion(complete_ids, torch.empty(1)).item())
+        self.assertEqual(
+            criterion.completed_response_lengths,
+            (len(suffix),),
+        )
+
     def test_travel_trainer_injects_fresh_prefix_and_stop_constraints(self):
         tokenizer = FakeTokenizer()
         trainer = object.__new__(StructuredOutputMAGRPOTrainer)
@@ -268,6 +289,8 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         trainer.stop_after_complete_json = True
         trainer.tokenizers = [tokenizer]
         trainer.formatters = [lambda item, external_prompts=None: item["prompt"]]
+        prefix = build_agent_json_prefill(0, 3)
+        suffix = 'from Alpha to Beta"}]}'
 
         with patch.object(
             MAGRPOTrainer,
@@ -276,16 +299,16 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 "ok": True,
                 "prompt_input_ids": torch.tensor([[2, 3]]),
                 "completion_input_ids": [
-                    [torch.tensor([ord(char) for char in '"a":1}'])]
+                    [torch.tensor([ord(char) for char in suffix])]
                 ],
-                "completion_attention_mask": [[torch.ones(6)]],
-                "completions": [['"a":1}']],
-                "response_lens": [6],
+                "completion_attention_mask": [[torch.ones(len(suffix))]],
+                "completions": [[suffix]],
+                "response_lens": [len(suffix)],
             },
         ) as generate:
             result = trainer._generate_completions(
                 object(),
-                [{"prompt": "rendered chat prompt"}],
+                [{"prompt": "rendered chat prompt", "days": 3}],
                 agent_idx=0,
                 num_return_sequences=4,
             )
@@ -293,15 +316,21 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         call_kwargs = generate.call_args.kwargs
         self.assertIn("stopping_criteria", call_kwargs)
-        self.assertEqual(call_kwargs["prompts_override"], ["rendered chat prompt{"])
+        self.assertEqual(
+            call_kwargs["prompts_override"], ["rendered chat prompt" + prefix]
+        )
         self.assertNotIn("prompt_tokenizer_kwargs", call_kwargs)
         self.assertNotIn("response_length_resolver", call_kwargs)
         self.assertIsInstance(
             call_kwargs["stopping_criteria"][-1],
             CompleteJSONObjectCriteria,
         )
-        self.assertEqual(result["completions"], [['{"a":1}']])
-        self.assertEqual(result["response_lens"], [6])
+        self.assertEqual(
+            call_kwargs["stopping_criteria"][-1].initial_text,
+            prefix,
+        )
+        self.assertEqual(result["completions"], [[prefix + suffix]])
+        self.assertEqual(result["response_lens"], [len(suffix)])
         self.assertNotIn("completion_loss_mask", result)
 
     def test_real_hf_generate_crops_each_stopped_sequence_before_padded_eos(self):
@@ -332,6 +361,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             reference_kl_enabled=False,
         )
         trainer.reference_models = []
+        prefix = build_agent_json_prefill(0, 3)
 
         with patch(
             "comlrl.trainers.reinforce.magrpo.apply_tokenizer_specials",
@@ -339,7 +369,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         ):
             result = trainer._generate_completions(
                 model,
-                [{}],
+                [{"days": 3}],
                 agent_idx=0,
                 num_return_sequences=4,
                 max_new_tokens=24,
@@ -349,7 +379,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 ),
             )
 
-        expected = ["{" + response for response in _ForceDifferentJSONRows.responses]
+        expected = [prefix + response for response in _ForceDifferentJSONRows.responses]
         self.assertEqual(result["completions"], [expected])
         self.assertEqual(
             result["response_lens"],

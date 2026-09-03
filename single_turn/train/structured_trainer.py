@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from comlrl.trainers.reinforce import MAGRPOTrainer
 
+from single_turn.formatting import build_agent_json_prefill
 from single_turn.structured_generation import (
     CompleteJSONObjectCriteria,
     with_json_stopping_criterion,
@@ -115,15 +116,30 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             prompts_override=prompts_override,
             external_prompts=external_prompts,
         )
+        assistant_prefix = ""
         if self.force_json_prefix:
             if not self.chat_formatted_prompts:
                 raise ValueError(
                     "travel.force_json_prefix=true requires chat-formatted prompts."
                 )
-            # Treat the fixed opening brace as assistant prefill. It is therefore
-            # context rather than a sampled policy token; the reward-facing text
-            # is reconstructed after generation.
-            prompts = [prompt + "{" for prompt in prompts]
+            prefixes = [
+                build_agent_json_prefill(agent_idx, int(item.get("days", 0)))
+                for item in batch_items
+            ]
+            # Every generation call belongs to one agent, whose first role-owned
+            # slot is invariant across Travel trip lengths. Keeping this explicit
+            # prevents a future role change from silently using the wrong JSON
+            # parser state for a mixed batch.
+            if len(set(prefixes)) != 1:
+                raise ValueError(
+                    "A generation batch must use one shared Travel assistant prefill."
+                )
+            assistant_prefix = prefixes[0]
+            # The fixed schema/prefix is context rather than a sampled policy
+            # token. Reward-facing text is reconstructed after generation.
+            prompts = [
+                prompt + prefix for prompt, prefix in zip(prompts, prefixes)
+            ]
 
         tokenizer = self.tokenizers[agent_idx]
         prompt_encodings = tokenizer(
@@ -138,7 +154,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             json_criterion = CompleteJSONObjectCriteria(
                 tokenizer,
                 prompt_length=prompt_length,
-                initial_text="{" if self.force_json_prefix else "",
+                initial_text=assistant_prefix,
             )
             kwargs["stopping_criteria"] = with_json_stopping_criterion(
                 kwargs.get("stopping_criteria"),
@@ -202,7 +218,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                 clean_up_tokenization_spaces=False,
             )
             if self.force_json_prefix:
-                text = "{" + text
+                text = assistant_prefix + text
             cropped_tokens.append(tokens)
             response_lens.append(resolved_length)
             completion_texts.append(text)

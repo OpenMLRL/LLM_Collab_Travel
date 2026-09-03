@@ -17,7 +17,11 @@ from single_turn.aggregation import (
 )
 from single_turn.data import filter_rows, normalize_travelplanner_row, partition_rows
 from single_turn.evaluation import evaluate_single_turn_response
-from single_turn.formatting import get_single_turn_formatters
+from single_turn.formatting import (
+    build_agent_json_prefill,
+    build_compact_reference_context,
+    get_single_turn_formatters,
+)
 from single_turn.logger import (
     aggregate_single_turn_metrics,
     build_single_turn_eval_logger,
@@ -262,7 +266,7 @@ class ReferenceRewardTests(unittest.TestCase):
             valid_completions(), batch_item=fixture_item()
         )
         self.assertAlmostEqual(reward, 1.15, places=6)
-        self.assertEqual(detail["reward_backend"], "reference_constraint_v1")
+        self.assertEqual(detail["reward_backend"], "reference_constraint_dense_v5")
         self.assertEqual(detail["ultimate/reference_plan_success"], 1.0)
         self.assertEqual(detail["ultimate/collaboration_success"], 1.0)
         self.assertEqual(detail["ultimate/team_action_success"], 1.0)
@@ -342,6 +346,158 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(detail["ultimate/team_action_success"], 0.0)
         self.assertEqual(detail["ultimate/collaboration_success"], 0.0)
         self.assertEqual(detail["agent_0/decode_success"], 1.0)
+
+    def test_reward_recovers_complete_triples_but_ultimate_stays_strict(self):
+        outputs = valid_completions()
+        first = json.loads(outputs[0])
+        malformed = '{"agent_id":0,"assignments":[' + ",".join(
+            json.dumps(entry, ensure_ascii=False)[1:-1]
+            for entry in first["assignments"]
+        )
+        reward, detail = score_single_turn_response(
+            [malformed, outputs[1]], batch_item=fixture_item()
+        )
+        self.assertGreater(reward, 0.5)
+        self.assertEqual(detail["ultimate/team_action_success"], 0.0)
+        self.assertEqual(detail["agent_0/decode_success"], 0.0)
+        self.assertGreater(detail["shaping/agent_0/regex_triple_count"], 0.0)
+        self.assertGreater(detail["shaping/agent_0/recovered_owned_coverage"], 0.8)
+        self.assertGreater(detail["shaping/plan/required_grounded_recall"], 0.8)
+
+    def test_format_progress_distinguishes_list_from_copied_string(self):
+        reference = fixture_item()["reference_information"]
+        as_string = '{"agent_id":0,"assignments":"' + reference
+        as_list = (
+            '{"agent_id":0,"assignments":['
+            '"day":1,"field":"current_city",'
+            '"value":"from Alpha to Beta"}'
+        )
+        _, string_detail = score_single_turn_response(
+            [as_string, ""], batch_item=fixture_item()
+        )
+        _, list_detail = score_single_turn_response(
+            [as_list, ""], batch_item=fixture_item()
+        )
+        self.assertEqual(string_detail["shaping/agent_0/assignments_string"], 1.0)
+        self.assertEqual(string_detail["shaping/agent_0/assignments_list"], 0.0)
+        self.assertEqual(list_detail["shaping/agent_0/assignments_list"], 1.0)
+        self.assertGreater(
+            list_detail["shaping/agent_0/format_progress"],
+            string_detail["shaping/agent_0/format_progress"],
+        )
+        self.assertGreater(string_detail["reward_penalty/reference_copy"], 0.0)
+
+        overlong = as_list + (" unrelated-padding" * 300)
+        _, overlong_detail = score_single_turn_response(
+            [overlong, ""], batch_item=fixture_item()
+        )
+        self.assertGreater(overlong_detail["reward_penalty/overlong"], 0.0)
+
+    def test_recovered_grounded_triple_gets_shaping_only(self):
+        malformed = (
+            '{"agent_id":1,"assignments":['
+            '"day":2,"field":"lunch","value":"Diner, Beta"},'
+        )
+        reward, detail = score_single_turn_response(
+            ["", malformed], batch_item=fixture_item()
+        )
+        empty_reward, _ = score_single_turn_response(
+            ["", ""], batch_item=fixture_item()
+        )
+        self.assertGreater(reward, empty_reward)
+        self.assertEqual(detail["entity_grounding_precision"], 0.0)
+        self.assertEqual(detail["ultimate/reference_grounding"], 0.0)
+        self.assertEqual(detail["shaping/quoted_grounded_count"], 1.0)
+        self.assertGreater(detail["reward_component/quoted_grounding"], 0.0)
+
+        repeated = malformed.replace(
+            '"value":"Diner, Beta"',
+            '"value":"Diner, Beta"},'
+            '"day":2,"field":"breakfast","value":"Diner, Beta"},'
+            '"day":2,"field":"lunch","value":"Diner, Beta"',
+        )
+        _, repeated_detail = score_single_turn_response(
+            ["", repeated], batch_item=fixture_item()
+        )
+        self.assertEqual(repeated_detail["shaping/quoted_unique_grounded_count"], 1.0)
+        self.assertLess(repeated_detail["shaping/quoted_grounding_progress"], 1.0)
+
+        bare_name = malformed.replace("Diner, Beta", "Diner")
+        _, bare_detail = score_single_turn_response(
+            ["", bare_name], batch_item=fixture_item()
+        )
+        self.assertEqual(bare_detail["shaping/quoted_grounded_count"], 0.0)
+        self.assertEqual(bare_detail["reward_component/quoted_grounding"], 0.0)
+
+    def test_detached_value_spam_cannot_earn_grounding(self):
+        spam = (
+            '{"value":"Cafe, Beta","value":"Diner, Beta",'
+            '"value":"Museum, Beta"}'
+        )
+        reward, detail = score_single_turn_response(
+            [spam, ""], batch_item=fixture_item()
+        )
+        self.assertEqual(detail["shaping/quoted_grounded_count"], 0.0)
+        self.assertEqual(detail["reward_component/quoted_grounding"], 0.0)
+        self.assertLess(reward, 0.0)
+
+    def test_all_dash_and_route_only_do_not_form_a_high_reward_plateau(self):
+        dash_reward, _ = score_single_turn_response(
+            all_dash_completions(), batch_item=fixture_item()
+        )
+        route_only = valid_plan_values()
+        for field in ("breakfast", "attraction", "lunch", "dinner"):
+            route_only[(2, field)] = "-"
+        route_reward, route_detail = score_single_turn_response(
+            completions_from_values(route_only), batch_item=fixture_item()
+        )
+        valid_reward, _ = score_single_turn_response(
+            valid_completions(), batch_item=fixture_item()
+        )
+        self.assertLess(dash_reward, 0.20)
+        self.assertLess(route_reward, 0.75)
+        self.assertGreater(valid_reward - route_reward, 0.35)
+        self.assertEqual(route_detail["ultimate/collaboration_success"], 0.0)
+
+    def test_one_extra_assignment_does_not_erase_reward_contribution(self):
+        outputs = valid_completions()
+        over = json.loads(outputs[1])
+        over["assignments"].append(assignment(2, "dinner", "Bistro, Beta"))
+        reward, detail = score_single_turn_response(
+            [outputs[0], json.dumps(over)], batch_item=fixture_item()
+        )
+        self.assertGreater(reward, 0.5)
+        self.assertEqual(detail["agent_1/verified_contribution"], 0.0)
+        self.assertGreater(detail["shaping/contribution_mean"], 0.9)
+        self.assertGreater(detail["shaping/agent_1/recovered_owned_coverage"], 0.9)
+        self.assertGreater(detail["reward_penalty/invalid_action"], 0.0)
+
+    def test_dense_reward_order_and_component_accounting(self):
+        dash_reward, _ = score_single_turn_response(
+            all_dash_completions(), batch_item=fixture_item()
+        )
+        values = valid_plan_values()
+        values[(2, "lunch")] = "Imaginary Cafe, Beta"
+        partial_reward, partial_detail = score_single_turn_response(
+            completions_from_values(values), batch_item=fixture_item()
+        )
+        valid_reward, valid_detail = score_single_turn_response(
+            valid_completions(), batch_item=fixture_item()
+        )
+        self.assertLess(dash_reward, partial_reward)
+        self.assertLess(partial_reward, valid_reward)
+        positive = sum(
+            value
+            for key, value in partial_detail.items()
+            if key.startswith("reward_component/")
+        )
+        penalties = sum(
+            value
+            for key, value in partial_detail.items()
+            if key.startswith("reward_penalty/")
+        )
+        self.assertAlmostEqual(partial_detail["unclamped_reward"], positive - penalties)
+        self.assertAlmostEqual(valid_detail["reward"], 1.15)
 
     def test_conflicted_slot_is_not_a_verified_contribution(self):
         outputs = valid_completions()
@@ -605,6 +761,174 @@ class DataAndPromptTests(unittest.TestCase):
         self.assertIn('as "Name, City"', prompts[1])
         self.assertNotIn("annotated", prompts[0].casefold())
         self.assertNotIn("gold", prompts[1].casefold())
+
+    def test_role_prompts_use_evaluator_exact_compact_catalogs(self):
+        item = fixture_item()
+        logistics, experience = [
+            formatter(item) for formatter in get_single_turn_formatters(num_agents=2)
+        ]
+
+        self.assertIn(
+            '"Flight Number: F100, from Alpha to Beta" | cost=20', logistics
+        )
+        self.assertIn('"Hotel, Beta" | cost_per_night=100', logistics)
+        # Agent 0 owns even-day dinner, so its compact role catalog must also
+        # expose grounded restaurant choices.
+        self.assertIn('"Cafe, Beta" | average_cost=10', logistics)
+        self.assertNotIn("Museum, Beta", logistics)
+
+        self.assertIn('"Cafe, Beta" | average_cost=10', experience)
+        self.assertIn('"Museum, Beta"', experience)
+        self.assertNotIn("Hotel, Beta", experience)
+        self.assertNotIn("Flight Number: F100", experience)
+
+        for prompt in (logistics, experience):
+            self.assertIn("SHARED REFERENCE-DERIVED ROUTE SCAFFOLD", prompt)
+            self.assertIn(
+                'day=1 date=2022-01-01 kind=move current_city="from Alpha to Beta"',
+                prompt,
+            )
+            self.assertIn(
+                'day=2 date=2022-01-02 kind=stay current_city="Beta" '
+                'transportation="-"',
+                prompt,
+            )
+            self.assertNotIn("Main-Street", prompt)
+            self.assertNotIn("Park-Street", prompt)
+            self.assertNotIn("Website", prompt)
+
+    def test_compact_context_fails_closed_instead_of_dumping_raw_reference(self):
+        item = fixture_item()
+        item["id"] = "broken-reference"
+        item["reference_information"] = "private raw table text"
+        item["reference_records"] = []
+        with self.assertRaisesRegex(ValueError, "broken-reference"):
+            build_compact_reference_context(item, 0)
+
+    def test_five_day_route_scaffold_is_shared_and_follows_dated_routes(self):
+        records = [
+            {
+                "Description": f"Attractions in {city}",
+                "Content": (
+                    "Name Latitude Longitude Address Phone Website City\n"
+                    f"Museum 1.0 2.0 Address 555 site {city}"
+                ),
+            }
+            for city in ("Evansville", "South Bend")
+        ]
+        records.extend(
+            {
+                "Description": f"Restaurants in {city}",
+                "Content": (
+                    "Name Average Cost Cuisines Aggregate Rating City\n"
+                    f"Cafe 10 American 4.0 {city}"
+                ),
+            }
+            for city in ("Evansville", "South Bend")
+        )
+        records.extend(
+            {
+                "Description": f"Accommodations in {city}",
+                "Content": (
+                    "NAME price room type house_rules minimum nights maximum "
+                    "occupancy review rate number city\n"
+                    f"Hotel 100 Private room No parties 1 2 4.0 {city}"
+                ),
+            }
+            for city in ("Evansville", "South Bend")
+        )
+        for number, start, end, date in (
+            (100, "Key West", "Evansville", "2022-01-01"),
+            (200, "Evansville", "South Bend", "2022-01-03"),
+            (300, "South Bend", "Key West", "2022-01-05"),
+        ):
+            content = (
+                "Flight Number Price DepTime ArrTime ActualElapsedTime "
+                "FlightDate OriginCityName DestCityName Distance\n"
+                f"F{number} 20 09:00 10:00 1 hours 0 minutes {date} "
+                f"{start} {end} 100"
+            )
+            # An unavailable flight must still define the dated route. The
+            # agent can choose a separately listed ground option for that leg.
+            if number == 200:
+                content = f"There is no flight from {start} to {end} on {date}."
+            records.append(
+                {
+                    "Description": f"Flight from {start} to {end} on {date}",
+                    "Content": content,
+                }
+            )
+            if number == 200:
+                records.append(
+                    {
+                        "Description": f"Self-driving from {start} to {end}",
+                        "Content": (
+                            f"self-driving, from {start} to {end}, duration: "
+                            "2 hours, distance: 100 km, cost: 5"
+                        ),
+                    }
+                )
+        item = {
+            "days": 5,
+            "dates": [f"2022-01-0{day}" for day in range(1, 6)],
+            "org": "Key West",
+            "reference_information": repr(records),
+        }
+        logistics = build_compact_reference_context(item, 0)
+        experience = build_compact_reference_context(item, 1)
+        logistics_scaffold = logistics.split(
+            "ROLE-SPECIFIC COMPACT REFERENCE CATALOG", 1
+        )[0]
+        experience_scaffold = experience.split(
+            "ROLE-SPECIFIC COMPACT REFERENCE CATALOG", 1
+        )[0]
+        self.assertEqual(logistics_scaffold, experience_scaffold)
+        for expected in (
+            'day=1 date=2022-01-01 kind=move current_city="from Key West to Evansville"',
+            'day=2 date=2022-01-02 kind=stay current_city="Evansville"',
+            'day=3 date=2022-01-03 kind=move current_city="from Evansville to South Bend"',
+            'day=4 date=2022-01-04 kind=stay current_city="South Bend"',
+            'day=5 date=2022-01-05 kind=move current_city="from South Bend to Key West"',
+        ):
+            self.assertIn(expected, logistics_scaffold)
+
+    def test_prompt_and_generation_prefix_start_first_owned_value(self):
+        prefixes = [
+            build_agent_json_prefill(agent_idx, 3) for agent_idx in range(2)
+        ]
+        self.assertEqual(
+            prefixes[0],
+            '{"agent_id": 0, "assignments": [{"day": 1, '
+            '"field": "current_city", "value": "',
+        )
+        self.assertEqual(
+            prefixes[1],
+            '{"agent_id": 1, "assignments": [{"day": 1, '
+            '"field": "breakfast", "value": "',
+        )
+        prompts = [
+            formatter(fixture_item())
+            for formatter in get_single_turn_formatters(num_agents=2)
+        ]
+        for prefix, prompt in zip(prefixes, prompts):
+            self.assertIn(prefix, prompt)
+            self.assertIn("do not repeat any portion of it", prompt)
+            self.assertIn("already-open value string", prompt)
+
+    def test_non_prefill_prompt_requests_a_complete_json_object(self):
+        prompts = [
+            formatter(fixture_item())
+            for formatter in get_single_turn_formatters(
+                num_agents=2, force_json_prefix=False
+            )
+        ]
+        for agent_idx, prompt in enumerate(prompts):
+            self.assertNotIn("already supplied", prompt)
+            self.assertNotIn("already-open value string", prompt)
+            self.assertIn(
+                f'{{"agent_id": {agent_idx}, "assignments": [', prompt
+            )
+            self.assertIn('first generated character must be "{"', prompt)
 
 
 if __name__ == "__main__":

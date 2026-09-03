@@ -51,25 +51,34 @@ travel:
   system_prompt: >-
     You are one agent in a decentralized travel-planning team. Follow the user's
     role and output contract exactly. Return only the requested JSON object.
-  # Strict decoding uses "{" as assistant prefill (not a sampled policy token),
-  # then stops each sequence independently at its matching top-level "}".
+  # Strict decoding prefills the fixed JSON schema through the opening quote of
+  # each role's first value (not sampled policy tokens), then stops each
+  # sequence independently at its matching top-level "}".
   force_json_prefix: true
   stop_after_complete_json: true
 
 travel_reward:
+  # Reward v5 keeps malformed/partial generations distinguishable while the
+  # reward-independent ultimate evaluator remains strict.
   parse_weight: 0.05
-  # These five reference/constraint terms sum to 1.0 before the joint gate.
+  format_progress_weight: 0.10
+  assignment_progress_weight: 0.10
+  quoted_grounding_weight: 0.10
+  plan_quality_weight: 0.70
+  # These five terms sum to the unit plan-quality score.
   assignment_coverage_weight: 0.10
   required_grounded_weight: 0.15
   grounding_f1_weight: 0.15
   commonsense_weight: 0.35
   hard_constraint_weight: 0.25
   final_success_bonus: 0.10
-  cooperation_floor: 0.20
   overlap_penalty: 0.10
   conflict_penalty: 0.20
   invalid_action_penalty: 0.10
   contribution_deficit_penalty: 0.15
+  protocol_deficit_penalty: 0.15
+  reference_copy_penalty: 0.25
+  overlong_penalty: 0.15
   min_reward: -0.5
   max_reward: 1.15
 
@@ -90,9 +99,13 @@ magrpo:
   discount: 1.0
   joint_mode: aligned
   early_termination_threshold: null
-  rollout_buffer_size: 4
-  train_batch_size: 4
-  advantage_normalization: true
+  # The prior buffer of four updated after only 16 env steps. With Travel's
+  # long structured completions, per-prompt unit-variance normalization turned
+  # near-zero reward noise into order-one advantages and collapsed both runs.
+  # Ten prompts still fit sequentially on one B200 and divide each 60-row epoch.
+  rollout_buffer_size: 10
+  train_batch_size: 10
+  advantage_normalization: false
   advantage_mode: mean
   # Evaluate one balanced four-row panel at the start of each epoch. Five calls
   # cover all 20 held-out rows; the terminal evaluation uses the full pool.
@@ -115,7 +128,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-reference-constraints-v4-60train
+  name: Travel-magrpo-qwen3-4b-dense-recovery-v5-60train
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -124,6 +137,8 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
-  - reward-v4-reference-constraints
+  - reward-v5-dense-recovery
+  - compact-role-catalogs
+  - no-advantage-normalization
   - validation-simple-60train-20eval
   - structured-json

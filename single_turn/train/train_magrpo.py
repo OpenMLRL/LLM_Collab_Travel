@@ -117,7 +117,7 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
 
 
 def _contract_probe_completions(batch_item: Dict[str, Any]) -> List[str]:
-    """Build strict all-empty actions to verify plumbing without a target plan."""
+    """Build strict all-dash actions to verify plumbing without a target plan."""
 
     days = int(batch_item["days"])
     return [
@@ -151,6 +151,9 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
     formatters = get_single_turn_formatters(
         num_agents=int(magrpo.get("num_agents", 2)),
         role_mode=str(config.get("travel.role_mode", "partitioned_roles")),
+        force_json_prefix=_bool(
+            config.get("travel.force_json_prefix", True), default=True
+        ),
     )
     all_rows = [*train_rows, *eval_rows]
     # Also validate that all held-out prompts can be indexed unambiguously by
@@ -177,9 +180,9 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
         ),
         "reward_backend": details["reward_backend"],
         "reward_range": list(make_reward(reward_cfg).reward_range),
-        "strict_empty_probe_reward": reward,
-        "strict_empty_probe_team_action_valid": details["team_action_valid"],
-        "strict_empty_probe_required_grounded_recall": details[
+        "all_dash_contract_probe_reward": reward,
+        "all_dash_contract_probe_team_action_valid": details["team_action_valid"],
+        "all_dash_contract_probe_required_grounded_recall": details[
             "required_grounded_recall"
         ],
         "sample_reference_catalog_counts": details["reference_catalog_counts"],
@@ -214,6 +217,19 @@ def main() -> None:
         config.update(parse_overrides(args.override))
 
     train_rows, eval_rows = _load_data(config)
+    catalog_failures = [
+        str(row.get("id", row.get("source_index", "unknown")))
+        for row in [*train_rows, *eval_rows]
+        if not parse_reference_catalog(
+            str(row.get("reference_information", ""))
+        ).parse_success
+    ]
+    if catalog_failures:
+        preview = ", ".join(catalog_failures[:5])
+        raise ValueError(
+            "Reference catalog parsing failed before model loading for "
+            f"{len(catalog_failures)} Travel rows: {preview}"
+        )
     magrpo_section = config.get_section("magrpo")
     num_agents = int(magrpo_section.get("num_agents", 2))
     if num_agents != 2:
@@ -314,9 +330,13 @@ def main() -> None:
     use_chat_template = _bool(
         config.get("travel.use_chat_template", True), default=True
     )
+    force_json_prefix = _bool(
+        config.get("travel.force_json_prefix", True), default=True
+    )
     formatters = get_single_turn_formatters(
         num_agents=num_agents,
         role_mode=str(config.get("travel.role_mode", "partitioned_roles")),
+        force_json_prefix=force_json_prefix,
         tokenizers=formatter_tokenizers,
         use_chat_template=use_chat_template,
         system_prompt=config.get("travel.system_prompt", DEFAULT_SYSTEM_PROMPT),
@@ -343,9 +363,7 @@ def main() -> None:
         eval_aggregator=aggregate_single_turn_metrics,
         args=trainer_args,
         chat_formatted_prompts=use_chat_template,
-        force_json_prefix=_bool(
-            config.get("travel.force_json_prefix", True), default=True
-        ),
+        force_json_prefix=force_json_prefix,
         stop_after_complete_json=_bool(
             config.get("travel.stop_after_complete_json", True), default=True
         ),

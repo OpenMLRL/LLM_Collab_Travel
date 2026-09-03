@@ -1,9 +1,10 @@
 # LLM Collaboration — TravelPlanner
 
 This repository implements a one-turn decentralized TravelPlanner task. Two
-LLM agents see the same request and reference information, act simultaneously,
-and receive one shared MAGRPO reward after a deterministic merger builds the
-team itinerary.
+LLM agents see the same request, constraints, and reference-derived route
+scaffold, act simultaneously, and receive one shared MAGRPO reward after a
+deterministic merger builds the team itinerary. Each agent receives a compact
+catalog tailored to its assigned work instead of the original raw tables.
 
 The task is environment-based rather than imitation-based. Human target plans
 are removed during data normalization and are never used by the prompt, reward,
@@ -89,6 +90,15 @@ assignment for every owned slot, including explicit `"-"` values where the
 itinerary convention permits an empty value. A deterministic merger combines
 the assignments without an LLM aggregator.
 
+Both prompts contain the same movement/stay scaffold, derived only from dated
+route descriptions in the reference slice. Agent 0 receives exact
+transportation values, accommodation metadata, and restaurant options needed
+for its even-day dinner duty. Agent 1 receives exact restaurant and attraction
+values. Addresses, coordinates, phone numbers, URLs, and unrelated table
+columns are omitted. The generation adapter also prefills the fixed JSON
+header through the opening quote of the first owned value, so the sampled
+policy starts by choosing task content instead of relearning the outer schema.
+
 The plan conventions are stated in both prompts:
 
 - a travel day uses `current_city="from A to B"` and requires matching
@@ -100,7 +110,7 @@ The plan conventions are stated in both prompts:
   cities;
 - selected entities must come from the supplied reference information.
 
-## Reference/constraint reward v4
+## Dense reference/constraint reward v5
 
 Each row's reference information is parsed once into catalogs for restaurants,
 attractions, accommodations, flights, taxis, and self-driving routes. The
@@ -109,48 +119,80 @@ minimum-night, and transportation checks.
 
 For each merged plan the scorer calculates:
 
-- strict and soft action validity for both agents;
-- owned-slot coverage and verified contribution by each agent;
+- strict action validity for the reward-independent end metrics;
+- reward-only format, owned-slot, and verified-contribution progress;
 - reference grounding precision and required grounded recall;
 - route continuity, closed-loop travel, city count, and city consistency;
 - required information, restaurant/attraction diversity, transportation
   consistency, and minimum-night compliance;
 - estimated total cost and all applicable user constraints.
 
-Let `P` be the harmonic mean of both agents' soft action validity and `C` the
-harmonic mean of their verified contribution ratios. The joint gate is:
-
-```text
-G = 0.20 + 0.80 × sqrt(P × C)
-```
-
-The dense plan score is:
+To prevent vacuously satisfied checks from rewarding an all-dash itinerary,
+let `S = 0.10 + 0.90 × required grounded recall`. The unit plan-quality score
+is:
 
 ```text
 Q = 0.10 × assignment coverage
   + 0.15 × required grounded recall
   + 0.15 × grounding F1
-  + 0.35 × commonsense soft score
-  + 0.25 × applicable hard-constraint soft score
+  + S × (0.35 × commonsense soft score
+       + 0.25 × applicable hard-constraint soft score)
 ```
 
-The shared MAGRPO reward is:
+Let `P` be mean strict parse success, `F` bounded JSON-format progress, and
+`A = 0.25 × balanced owned-slot coverage + 0.75 × required fill rate`. Let `G`
+be field-aware grounding progress over recovered complete assignment triples,
+balanced across the two agents, and `U` strict collaboration success. The
+shared MAGRPO reward is additive:
 
 ```text
-R = 0.05 × mean strict parse success
-  + G × Q
-  + 0.10 × collaboration success
+R = 0.05 × P
+  + 0.10 × F
+  + 0.10 × A
+  + 0.10 × G
+  + 0.70 × Q
+  + 0.10 × U
   - 0.10 × overlap rate
   - 0.20 × conflict rate
-  - 0.10 × invalid-action rate
-  - 0.15 × (1 - C)
+  - 0.10 × invalid/rejected-action rate
+  - 0.15 × verified-contribution deficit
+  - 0.15 × strict-protocol deficit
+  - 0.25 × sustained reference-copy rate
+  - 0.15 × overlength rate
 ```
 
 `R` is clamped to `[-0.50, 1.15]`. A strict, fully grounded, constraint-valid
-plan with verified contributions from both agents receives `1.15`. The
-terminal bonus is small; dense component scores still distinguish imperfect
-rollouts early in training. Filling every slot with `"-"` cannot exploit the
-budget or grounding terms because required grounded recall becomes zero.
+plan with verified contributions from both agents receives `1.15`.
+
+Reward-only recovery extracts complete quoted `(day, field, value)` triples
+from a malformed or truncated action and scores the valid owned subset. One
+extra object therefore incurs an invalid-action penalty without erasing all of
+the otherwise useful work. This recovery never changes the strict parser or
+the ultimate metrics: malformed JSON, wrong ownership, missing slots, and
+over-capacity actions still fail the reported end result. Filling every slot
+with `"-"` cannot receive grounding or final-success credit, and copying a raw
+reference table is explicitly penalized.
+
+The former multiplicative cooperation gate was removed because a single broken
+agent forced all plan-quality gradients to zero. The additive surface keeps
+partial progress measurable while its balanced assignment/contribution terms
+and strict terminal bonus still reward both agents doing their share.
+
+## Training stability
+
+The default keeps `advantage_mode=mean` but disables per-prompt unit-variance
+normalization. In the two failed v4 runs, only 23/1260 and 25/1260 prompt groups
+had any nonzero reward variation; almost-zero numerical differences in the
+first optimizer batches were nevertheless expanded to order-one advantages.
+Because Travel completions are much longer than BFCL completions and MAGRPO
+sums token log-probabilities, both policies collapsed after the first updates
+and then received zero learning signal.
+
+The rollout and train buffers are now 10 prompts rather than 4. This changes
+neither the 5040-env-step budget nor model memory residency, but reduces the
+number of optimizer updates from 315 to 126 and averages a broader set of
+prompts per update. Learning rate, number of generations, and maximum response
+length are unchanged.
 
 ## End metrics
 
@@ -247,7 +289,7 @@ python -u single_turn/train/train_magrpo.py \
 ```
 
 W&B defaults to project `Travel` and run name
-`Travel-magrpo-qwen3-4b-reference-constraints-v4-60train`.
+`Travel-magrpo-qwen3-4b-dense-recovery-v5-60train`.
 
 ## Tests
 
@@ -258,10 +300,11 @@ python -m unittest discover -s tests -v
 ```
 
 They verify that different valid itineraries can both receive maximum reward,
-target-plan fields cannot change the score, ungrounded and all-empty plans are
-penalized, route and collaboration failures change the end metrics, weighted
-micro aggregation is correct, and the structured-generation path still crops
-each completed JSON object safely.
+target-plan fields cannot change the score, ungrounded and all-dash plans are
+penalized, reward-only malformed-action recovery cannot weaken ultimate
+metrics, compact role catalogs expose every owned choice, unavailable flights
+still preserve the shared route scaffold, and the structured-generation path
+reconstructs and crops each prefilled JSON object safely.
 
 ## Development workflow
 
