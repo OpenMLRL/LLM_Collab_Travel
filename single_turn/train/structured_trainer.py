@@ -5,13 +5,19 @@ from __future__ import annotations
 from numbers import Real
 from typing import Any, Dict, List, Optional
 
+import torch
+import torch.nn.functional as F
 import wandb
 
 from comlrl.trainers.reinforce import MAGRPOTrainer
+from comlrl.utils.distributed import unwrap_model
 
+from single_turn.aggregation import ordered_owned_slots
 from single_turn.formatting import build_agent_json_prefill
 from single_turn.structured_generation import (
     CompleteJSONObjectCriteria,
+    FixedSlotJSONLogitsProcessor,
+    with_fixed_slot_json_processor,
     with_greedy_argmax_processor,
     with_json_stopping_criterion,
 )
@@ -25,6 +31,10 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         *args: Any,
         chat_formatted_prompts: bool = False,
         force_json_prefix: bool = True,
+        constrain_json_skeleton: bool = True,
+        max_value_tokens: int = 32,
+        normalize_value_log_probs: bool = True,
+        role_mode: str = "partitioned_roles",
         stop_after_complete_json: bool = True,
         rotate_eval_subset: bool = False,
         greedy_eval: bool = True,
@@ -34,6 +44,10 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
     ):
         self.chat_formatted_prompts = bool(chat_formatted_prompts)
         self.force_json_prefix = bool(force_json_prefix)
+        self.constrain_json_skeleton = bool(constrain_json_skeleton)
+        self.max_value_tokens = int(max_value_tokens)
+        self.normalize_value_log_probs = bool(normalize_value_log_probs)
+        self.role_mode = str(role_mode)
         self.stop_after_complete_json = bool(stop_after_complete_json)
         self.rotate_eval_subset = bool(rotate_eval_subset)
         self.greedy_eval = bool(greedy_eval)
@@ -46,9 +60,32 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         self._travel_train_epoch_cursor = 0
         self._travel_curriculum_stage = 1
         self._travel_train_detail_groups: List[Dict[str, float]] = []
-        self._travel_eval_baseline: Optional[Dict[str, float]] = None
         self._eval_cursor = 0
+        if self.max_value_tokens < 1:
+            raise ValueError("max_value_tokens must be positive.")
+        if self.constrain_json_skeleton and not (
+            self.chat_formatted_prompts
+            and self.force_json_prefix
+            and self.stop_after_complete_json
+        ):
+            raise ValueError(
+                "constrain_json_skeleton=true requires chat formatting, the JSON "
+                "assistant prefix, and complete-JSON stopping."
+            )
+        if self.constrain_json_skeleton and self.role_mode != "partitioned_roles":
+            raise ValueError(
+                "constrain_json_skeleton=true currently requires "
+                "role_mode=partitioned_roles."
+            )
         super().__init__(*args, **kwargs)
+        if self.constrain_json_skeleton and bool(
+            getattr(self.args, "reference_kl_enabled", False)
+        ):
+            raise ValueError(
+                "Travel's fixed skeleton excludes schema tokens from the policy "
+                "loss, so reference_kl_enabled must remain false until the same "
+                "value-token mask is applied to the reference KL."
+            )
         if self.curriculum_short_epochs > int(self.args.num_train_epochs):
             raise ValueError(
                 "curriculum_short_epochs cannot exceed num_train_epochs."
@@ -157,6 +194,9 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "train/grounding_f1": "grounding_f1",
             "train/reference_commonsense_soft": "commonsense_soft",
             "train/reference_hard_soft": "hard_constraint_soft",
+            "train/required_plan_completion": (
+                "ultimate/required_plan_completion"
+            ),
             "train/reference_plan_success": (
                 "ultimate/reference_plan_success"
             ),
@@ -207,6 +247,128 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         self._travel_train_detail_groups = pending
         return result
 
+    def _pack_completions_for_buffer(
+        self, completions_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Keep Travel's value-token mask when stock MAGRPO buffers a rollout."""
+
+        packed = super()._pack_completions_for_buffer(completions_data)
+        raw_masks = completions_data.get("completion_loss_mask")
+        if raw_masks:
+            masks = raw_masks[0] if isinstance(raw_masks[0], list) else raw_masks
+            packed["completion_loss_mask"] = [[mask.cpu() for mask in masks]]
+        return packed
+
+    def _compute_loss_with_gradients(
+        self, agent: Any, completions_data: Dict[str, Any], returns: Any
+    ) -> torch.Tensor:
+        """Apply MAGRPO only to freely selected value tokens for this domain.
+
+        The fixed JSON skeleton is an environment action schema, not a policy
+        decision.  Excluding those forced tokens and averaging the remaining
+        token log probabilities prevents long Travel JSON responses from
+        scaling one policy update by hundreds of syntax tokens.
+        """
+
+        raw_masks = completions_data.get("completion_loss_mask")
+        if not raw_masks:
+            return super()._compute_loss_with_gradients(
+                agent, completions_data, returns
+            )
+
+        agent_module = unwrap_model(agent)
+        device = next(agent_module.parameters()).device
+        if len(returns) == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        returns_tensor = torch.tensor(returns, dtype=torch.float, device=device)
+        effective_returns = self._apply_reference_kl_to_returns(
+            returns_tensor, completions_data
+        )
+        advantages = self._compute_advantages(effective_returns)
+        if self.args.advantage_normalization and advantages.numel() > 1:
+            mean = advantages.mean()
+            std = advantages.std(unbiased=False).clamp(min=1e-6)
+            advantages = (advantages - mean) / std
+
+        agent.train()
+        prompt_ids = completions_data["prompt_input_ids"].to(device)[0]
+        raw_completion_ids = completions_data["completion_input_ids"]
+        completion_ids = (
+            raw_completion_ids[0]
+            if raw_completion_ids and isinstance(raw_completion_ids[0], list)
+            else raw_completion_ids
+        )
+        masks = raw_masks[0] if isinstance(raw_masks[0], list) else raw_masks
+        if len(completion_ids) != len(masks):
+            raise ValueError(
+                "Travel completion IDs and value-token masks must have the same "
+                f"number of sequences; got {len(completion_ids)} and {len(masks)}."
+            )
+        if len(completion_ids) != len(advantages):
+            raise ValueError(
+                "Travel completions and advantages must have the same number of "
+                f"sequences; got {len(completion_ids)} and {len(advantages)}."
+            )
+
+        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        num_samples = 0
+        for seq_idx, (raw_tokens, raw_mask) in enumerate(
+            zip(completion_ids, masks)
+        ):
+            completion_tokens = raw_tokens.to(device)
+            loss_mask = raw_mask.to(device=device, dtype=torch.bool)
+            if completion_tokens.numel() != loss_mask.numel():
+                raise ValueError(
+                    "Each Travel completion and value-token mask must have equal "
+                    f"length; sequence {seq_idx} has {completion_tokens.numel()} "
+                    f"tokens and {loss_mask.numel()} mask entries."
+                )
+            if completion_tokens.numel() < 1:
+                continue
+            input_ids = torch.cat([prompt_ids, completion_tokens[:-1]])
+            attention_mask = torch.ones(len(input_ids), device=device)
+            outputs = agent(
+                input_ids=input_ids.unsqueeze(0),
+                attention_mask=attention_mask.unsqueeze(0),
+                use_cache=False,
+            )
+            # ``input_ids`` already omits only the final completion token, so
+            # the prompt's last position through the sequence's last position
+            # provides exactly one prediction for every target token.
+            completion_logits = outputs.logits[0, prompt_ids.size(0) - 1 :, :]
+            if completion_logits.size(0) != completion_tokens.numel():
+                raise RuntimeError(
+                    "Travel policy-loss logits are not aligned with completion "
+                    f"tokens: got {completion_logits.size(0)} predictions for "
+                    f"{completion_tokens.numel()} targets."
+                )
+            selected_logits = completion_logits[loss_mask]
+            selected_targets = completion_tokens[loss_mask]
+            selected_count = int(selected_targets.numel())
+            if selected_count < 1:
+                continue
+            # Match stock MAGRPO's objective: rollout temperature/top-p and the
+            # JSON grammar construct actions, while replay scores chosen tokens
+            # under the base LM distribution. Keeping the full-vocabulary
+            # denominator also teaches the model to move probability mass away
+            # from tokens the environment had to mask as invalid JSON.
+            sequence_log_prob = -F.cross_entropy(
+                selected_logits,
+                selected_targets,
+                reduction="sum",
+            )
+            if getattr(self, "normalize_value_log_probs", True):
+                sequence_log_prob = sequence_log_prob / selected_count
+            total_loss = total_loss - sequence_log_prob * advantages[seq_idx]
+            num_samples += 1
+
+        if num_samples:
+            total_loss = total_loss / num_samples
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            return torch.tensor(0.1, device=device, requires_grad=True)
+        return total_loss
+
     def _log_eval_metrics(
         self,
         all_agent_completions_turns: Any,
@@ -215,14 +377,9 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         all_prompts: Any,
         extra_metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Log Travel-friendly aliases without changing stock MAGRPO.
+        """Publish one compact, stable set of Travel eval metrics to W&B."""
 
-        Existing W&B workspaces often point at ``eval/reward`` while modern
-        MAGRPO emits ``eval/turn_1/reward_mean``.  Keep both names, and expose a
-        compact set of headline aliases next to the detailed metric tree.
-        """
-
-        metrics: Dict[str, Any] = {}
+        raw_metrics: Dict[str, Any] = {}
         detailed = []
         if (
             self.eval_logger is not None
@@ -239,50 +396,61 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             anchor_size = int(getattr(self.args, "eval_num_samples", len(detailed)))
             is_full_eval = len(detailed) > anchor_size
             if is_full_eval:
+                # Full-pool evaluation only needs aggregate scalars.  Keep the
+                # representative output table on the fixed anchor so terminal
+                # evaluation does not build and upload a second large table.
+                full_rows = [
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if key != "_eval_sample"
+                    }
+                    for row in detailed
+                ]
                 full_aggregated = self.eval_aggregator(
-                    detailed, num_turns=self.args.num_turns
+                    full_rows, num_turns=self.args.num_turns
                 )
                 anchor_rows = detailed[:anchor_size]
                 anchor_aggregated = self.eval_aggregator(
                     anchor_rows, num_turns=self.args.num_turns
                 )
-                metrics.update(
+                raw_metrics.update(
                     {
                         f"eval_full/{key}": value
                         for key, value in full_aggregated.items()
                     }
                 )
-                metrics.update(
+                raw_metrics.update(
                     {
                         f"eval/{key}": value
                         for key, value in anchor_aggregated.items()
                     }
                 )
-                anchor_rewards = [
+                anchor_reward_values = [
                     row.get("_eval_sample", {}).get("reward")
                     for row in anchor_rows
                 ]
-                anchor_rewards = [
-                    float(value)
-                    for value in anchor_rewards
-                    if isinstance(value, Real)
-                ]
-                if anchor_rewards:
-                    anchor_reward = sum(anchor_rewards) / len(anchor_rewards)
-                    metrics["eval/turn_1/reward_mean"] = anchor_reward
-                    metrics["eval/turn_1/expected_return"] = anchor_reward
+                if not all(
+                    isinstance(value, Real) for value in anchor_reward_values
+                ):
+                    raise ValueError(
+                        "Every fixed-anchor eval row must contain a numeric reward."
+                    )
+                anchor_rewards = [float(value) for value in anchor_reward_values]
+                anchor_reward = sum(anchor_rewards) / len(anchor_rewards)
+                raw_metrics["eval/turn_1/reward_mean"] = anchor_reward
             else:
                 aggregated = self.eval_aggregator(
                     detailed, num_turns=self.args.num_turns
                 )
-                metrics.update(
+                raw_metrics.update(
                     {f"eval/{key}": value for key, value in aggregated.items()}
                 )
         if isinstance(extra_metrics, dict):
             if detailed and len(detailed) > int(
                 getattr(self.args, "eval_num_samples", len(detailed))
             ):
-                metrics.update(
+                raw_metrics.update(
                     {
                         (
                             "eval_full/" + key.removeprefix("eval/")
@@ -293,134 +461,52 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                     }
                 )
             else:
-                metrics.update(extra_metrics)
+                raw_metrics.update(extra_metrics)
 
-        alias_sources = {
-            "eval/reward": "eval/turn_1/reward_mean",
-            "eval/reward_mean": "eval/turn_1/reward_mean",
-            "eval/turn_1/reward": "eval/turn_1/reward_mean",
-            "eval/action_validity": "eval/turn_1/action_validity",
-            "eval/team_action_success": (
-                "eval/turn_1/ultimate/team_action_success"
-            ),
-            "eval/both_agent_verified_contribution": (
-                "eval/turn_1/ultimate/both_agent_verified_contribution"
-            ),
-            "eval/both_agent_required_grounded_contribution": (
-                "eval/turn_1/ultimate/"
-                "both_agent_required_grounded_contribution"
-            ),
-            "eval/collaboration_success": (
-                "eval/turn_1/ultimate/collaboration_success"
-            ),
-            "eval/reference_plan_success": (
-                "eval/turn_1/ultimate/reference_plan_success"
-            ),
-            "eval/reference_commonsense_micro": (
-                "eval/turn_1/ultimate/reference_commonsense_micro"
-            ),
-            "eval/reference_hard_micro": (
-                "eval/turn_1/ultimate/reference_hard_micro"
-            ),
-            "eval/required_grounded_recall": (
-                "eval/turn_1/required_grounded_recall"
-            ),
-            "eval/required_cooperative_contribution": (
-                "eval/turn_1/required_cooperative_contribution"
-            ),
-            "eval/entity_grounding_precision": (
-                "eval/turn_1/entity_grounding_precision"
-            ),
-            "eval/grounding_f1": "eval/turn_1/grounding_f1",
-            "eval/route_scaffold_match": (
-                "eval/turn_1/route_scaffold_match_rate"
-            ),
-            "eval/plan_score": "eval/turn_1/reward_model/plan_score",
-            "eval/strict_composite_quality": (
-                "eval/turn_1/reward_model/strict_composite_quality"
-            ),
-            "eval/protocol_progress": (
-                "eval/turn_1/reward_model/protocol_progress"
-            ),
-            "eval/recovered_semantic_balance": (
-                "eval/turn_1/reward_model/recovered_semantic_balance"
-            ),
-            "eval/recovered_plan_score": (
-                "eval/turn_1/reward_model/recovered_plan_score"
-            ),
-            "eval/recovered_composite_quality": (
-                "eval/turn_1/reward_model/recovered_composite_quality"
-            ),
-            "eval_full/reward": "eval_full/turn_1/reward_mean",
-            "eval_full/reward_mean": "eval_full/turn_1/reward_mean",
-            "eval_full/collaboration_success": (
-                "eval_full/turn_1/ultimate/collaboration_success"
-            ),
-            "eval_full/team_action_success": (
-                "eval_full/turn_1/ultimate/team_action_success"
-            ),
-            "eval_full/required_cooperative_contribution": (
-                "eval_full/turn_1/required_cooperative_contribution"
-            ),
-        }
-        aliases = {
-            alias: metrics[source]
-            for alias, source in alias_sources.items()
-            if source in metrics
-        }
-        metrics.update(aliases)
-        headline_aliases = {
-            "reward": "eval/reward",
-            "team_action_success": "eval/team_action_success",
+        scalar_sources = {
+            "reward": "turn_1/reward_mean",
+            "action_validity": "turn_1/action_validity",
+            "team_action_success": "turn_1/ultimate/team_action_success",
             "required_cooperative_contribution": (
-                "eval/required_cooperative_contribution"
+                "turn_1/required_cooperative_contribution"
             ),
-            "required_grounded_recall": "eval/required_grounded_recall",
-            "entity_grounding_precision": "eval/entity_grounding_precision",
-            "grounding_f1": "eval/grounding_f1",
+            "required_grounded_recall": "turn_1/required_grounded_recall",
+            "entity_grounding_precision": "turn_1/entity_grounding_precision",
+            "grounding_f1": "turn_1/grounding_f1",
+            "route_scaffold_match": "turn_1/route_scaffold_match_rate",
+            "reference_plan_delivery": (
+                "turn_1/ultimate/reference_plan_delivery"
+            ),
+            "required_plan_completion": (
+                "turn_1/ultimate/required_plan_completion"
+            ),
             "reference_commonsense_micro": (
-                "eval/reference_commonsense_micro"
+                "turn_1/ultimate/reference_commonsense_micro"
             ),
-            "reference_hard_micro": "eval/reference_hard_micro",
-            "reference_plan_success": "eval/reference_plan_success",
-            "collaboration_success": "eval/collaboration_success",
+            "reference_hard_micro": "turn_1/ultimate/reference_hard_micro",
+            "reference_plan_success": (
+                "turn_1/ultimate/reference_plan_success"
+            ),
+            "collaboration_success": (
+                "turn_1/ultimate/collaboration_success"
+            ),
         }
-        current_headlines = {
-            label: float(metrics[key])
-            for label, key in headline_aliases.items()
-            if isinstance(metrics.get(key), Real)
-        }
-        if current_headlines and not getattr(self, "rotate_eval_subset", False):
-            baseline = getattr(self, "_travel_eval_baseline", None)
-            if baseline is None:
-                baseline = dict(current_headlines)
-                self._travel_eval_baseline = baseline
-            comparable = sorted(set(baseline) & set(current_headlines))
-            for label in comparable:
-                metrics[f"eval/delta/{label}"] = (
-                    current_headlines[label] - baseline[label]
-                )
-            table_factory = getattr(wandb, "Table", None)
-            if (
-                self.wandb_initialized
-                and wandb.run is not None
-                and callable(table_factory)
-            ):
-                metrics["eval/headline_summary"] = table_factory(
-                    columns=["metric", "initial", "current", "delta"],
-                    data=[
-                        [
-                            label,
-                            baseline[label],
-                            current_headlines[label],
-                            current_headlines[label] - baseline[label],
-                        ]
-                        for label in comparable
-                    ],
-                )
+        metrics: Dict[str, Any] = {}
+        for namespace in ("eval", "eval_full"):
+            for output_name, source_suffix in scalar_sources.items():
+                source = f"{namespace}/{source_suffix}"
+                if isinstance(raw_metrics.get(source), Real):
+                    metrics[f"{namespace}/{output_name}"] = float(
+                        raw_metrics[source]
+                    )
+
+        # Keep exactly one representative output table under one stable key.
+        table = raw_metrics.get("eval/turn_1/eval_samples")
+        if table is not None:
+            metrics["eval/samples"] = table
         if self.wandb_initialized and wandb.run is not None:
-            # Log the table, detailed metrics, and aliases in one call. W&B
-            # discards a second committed log at the same explicit step.
+            # One committed write avoids W&B dropping a second write at the
+            # same explicit step and keeps the public metric surface compact.
             wandb.log(metrics, step=self.env_step, commit=True)
         return metrics
 
@@ -514,15 +600,6 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         external_prompts: Any = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        if (
-            getattr(self, "_travel_eval_generation", False)
-            and getattr(self, "greedy_eval", True)
-        ):
-            # Keep the fixed anchor comparable within a run without changing
-            # stock MAGRPO or disabling stochastic training rollouts.
-            kwargs["logits_processor"] = with_greedy_argmax_processor(
-                kwargs.get("logits_processor")
-            )
         prompts = self._resolve_prompts(
             batch_items,
             agent_idx=agent_idx,
@@ -562,6 +639,40 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             return_tensors="pt",
         )
         prompt_length = int(prompt_encodings.input_ids.shape[-1])
+        skeleton_processor = None
+        if getattr(self, "constrain_json_skeleton", False):
+            slot_orders = [
+                tuple(
+                    ordered_owned_slots(
+                        agent_idx,
+                        int(item.get("days", 0)),
+                    )
+                )
+                for item in batch_items
+            ]
+            if len(set(slot_orders)) != 1:
+                raise ValueError(
+                    "A constrained generation batch must share one Travel slot order."
+                )
+            skeleton_processor = FixedSlotJSONLogitsProcessor(
+                tokenizer,
+                prompt_length=prompt_length,
+                slots=slot_orders[0],
+                max_value_tokens=int(getattr(self, "max_value_tokens", 32)),
+                max_new_tokens=max_new_tokens,
+            )
+            kwargs["logits_processor"] = with_fixed_slot_json_processor(
+                kwargs.get("logits_processor"), skeleton_processor
+            )
+        if (
+            getattr(self, "_travel_eval_generation", False)
+            and getattr(self, "greedy_eval", True)
+        ):
+            # Grammar masking must run before argmax so eval chooses the best
+            # token that is valid in the current value/skeleton state.
+            kwargs["logits_processor"] = with_greedy_argmax_processor(
+                kwargs.get("logits_processor")
+            )
         json_criterion = None
         if self.stop_after_complete_json:
             json_criterion = CompleteJSONObjectCriteria(
@@ -636,6 +747,15 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             response_lens.append(resolved_length)
             completion_texts.append(text)
             completion_masks.append(tokens.new_ones(tokens.numel()))
+
+        if skeleton_processor is not None:
+            policy_masks = skeleton_processor.finalize_loss_masks(cropped_tokens)
+            result["completion_loss_mask"] = [
+                [
+                    tokens.new_tensor(mask, dtype=torch.bool)
+                    for tokens, mask in zip(cropped_tokens, policy_masks)
+                ]
+            ]
 
         result["prompts"] = prompts
         result["completions"] = [completion_texts]

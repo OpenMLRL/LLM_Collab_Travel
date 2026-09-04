@@ -247,6 +247,13 @@ def _dry_run(
         },
         "eval_at_end": _bool(magrpo.get("eval_at_end", True), default=True),
         "greedy_eval": _bool(config.get("travel.greedy_eval", True), default=True),
+        "constrain_json_skeleton": _bool(
+            config.get("travel.constrain_json_skeleton", True), default=True
+        ),
+        "max_value_tokens": int(config.get("travel.max_value_tokens", 32)),
+        "normalize_value_log_probs": _bool(
+            config.get("travel.normalize_value_log_probs", True), default=True
+        ),
         "periodic_eval_samples": int(magrpo.get("eval_num_samples", 4)),
         "final_eval_samples": int(magrpo.get("final_eval_num_samples", len(eval_rows))),
         "rotate_eval_subset": _bool(
@@ -329,6 +336,36 @@ def main() -> None:
         raise ValueError("magrpo.eval_num_samples must lie within the eval pool.")
     if not 1 <= final_eval_samples <= len(eval_rows):
         raise ValueError("magrpo.final_eval_num_samples must lie within the eval pool.")
+    constrain_json_skeleton = _bool(
+        config.get("travel.constrain_json_skeleton", True), default=True
+    )
+    role_mode = str(config.get("travel.role_mode", "partitioned_roles"))
+    if int(config.get("travel.max_value_tokens", 32)) < 1:
+        raise ValueError("travel.max_value_tokens must be positive.")
+    if constrain_json_skeleton and not all(
+        (
+            _bool(config.get("travel.use_chat_template", True), default=True),
+            _bool(config.get("travel.force_json_prefix", True), default=True),
+            _bool(config.get("travel.stop_after_complete_json", True), default=True),
+        )
+    ):
+        raise ValueError(
+            "travel.constrain_json_skeleton=true requires use_chat_template, "
+            "force_json_prefix, and stop_after_complete_json."
+        )
+    if constrain_json_skeleton and role_mode != "partitioned_roles":
+        raise ValueError(
+            "travel.constrain_json_skeleton=true currently requires "
+            "travel.role_mode=partitioned_roles."
+        )
+    if constrain_json_skeleton and _bool(
+        magrpo_section.get("reference_kl_enabled", False), default=False
+    ):
+        raise ValueError(
+            "travel.constrain_json_skeleton=true currently requires "
+            "magrpo.reference_kl_enabled=false because fixed schema tokens are "
+            "excluded from the Travel policy loss."
+        )
 
     if args.dry_run:
         _dry_run(config, train_rows, eval_rows, curriculum)
@@ -446,6 +483,14 @@ def main() -> None:
         args=trainer_args,
         chat_formatted_prompts=use_chat_template,
         force_json_prefix=force_json_prefix,
+        constrain_json_skeleton=_bool(
+            config.get("travel.constrain_json_skeleton", True), default=True
+        ),
+        max_value_tokens=int(config.get("travel.max_value_tokens", 32)),
+        normalize_value_log_probs=_bool(
+            config.get("travel.normalize_value_log_probs", True), default=True
+        ),
+        role_mode=role_mode,
         stop_after_complete_json=_bool(
             config.get("travel.stop_after_complete_json", True), default=True
         ),

@@ -33,15 +33,21 @@ def canonical_value(value: object) -> str:
     return text or "-"
 
 
-def assignment_capacity(days: int, num_agents: int) -> int:
+def assignment_capacity(
+    days: int, num_agents: int, *, agent_idx: int | None = None
+) -> int:
+    """Return the action capacity, accounting for a fixed role when requested."""
+
+    if agent_idx is not None and int(num_agents) == 2:
+        return len(owned_slots(int(agent_idx), int(days)))
     return int(math.ceil((len(PLAN_FIELDS) * int(days)) / max(1, int(num_agents))))
 
 
 def slot_owner(day: int, field: str, days: int) -> int:
     """Return the deterministic two-agent owner for one itinerary slot.
 
-    Logistics always belongs to agent 0, daily experience belongs to agent 1,
-    and even-day dinner slots move to agent 0 to balance odd-length trips.
+    Logistics always belongs to agent 0 and every daily-experience field,
+    including dinner, belongs to agent 1.
     """
 
     day = int(day)
@@ -49,8 +55,6 @@ def slot_owner(day: int, field: str, days: int) -> int:
     if not 1 <= day <= days or field not in PLAN_FIELDS:
         raise ValueError(f"Invalid TravelPlanner slot: day={day}, field={field!r}")
     if field in LOGISTICS_FIELDS:
-        return 0
-    if field == "dinner" and day % 2 == 0:
         return 0
     return 1
 
@@ -64,6 +68,18 @@ def owned_slots(agent_idx: int, days: int) -> Set[Slot]:
         for field in PLAN_FIELDS
         if slot_owner(day, field, int(days)) == agent_idx
     }
+
+
+def ordered_owned_slots(agent_idx: int, days: int) -> List[Slot]:
+    """Return one role's slots in the canonical generation/merge order."""
+
+    owned = owned_slots(agent_idx, days)
+    return [
+        (day, field)
+        for day in range(1, int(days) + 1)
+        for field in PLAN_FIELDS
+        if (day, field) in owned
+    ]
 
 
 @dataclass
@@ -109,14 +125,27 @@ def merge_agent_assignments(
     *,
     days: int,
     capacity: int | None = None,
+    capacities: Sequence[int] | None = None,
 ) -> MergeResult:
     num_agents = len(agent_completions)
-    cap = assignment_capacity(days, num_agents) if capacity is None else int(capacity)
+    if capacity is not None and capacities is not None:
+        raise ValueError("Pass either capacity or capacities, not both.")
+    if capacities is not None:
+        resolved_capacities = [int(value) for value in capacities]
+        if len(resolved_capacities) != num_agents:
+            raise ValueError("capacities must contain one value per agent.")
+    else:
+        shared_capacity = (
+            assignment_capacity(days, num_agents)
+            if capacity is None
+            else int(capacity)
+        )
+        resolved_capacities = [shared_capacity] * num_agents
     parsed = [
         parse_assignments(
             completion or "",
             expected_agent_id=agent_idx,
-            capacity=cap,
+            capacity=resolved_capacities[agent_idx],
             days=days,
             valid_fields=PLAN_FIELDS,
         )
@@ -128,13 +157,15 @@ def merge_agent_assignments(
     self_duplicate_count = 0
     per_agent: List[Dict[Slot, str]] = []
 
-    for result in parsed:
+    for agent_idx, result in enumerate(parsed):
         accepted: Dict[Slot, str] = {}
         # An over-capacity action is atomic and invalid.  Dropping only its tail
         # would still reward the "emit the whole plan and let the merger trim it"
         # policy observed in the first smoke run.
         allowed = result.assignments if result.capacity_valid else []
-        extra_assignment_count += max(0, result.raw_item_count - cap)
+        extra_assignment_count += max(
+            0, result.raw_item_count - resolved_capacities[agent_idx]
+        )
         for assignment in allowed:
             validated = _validate_assignment(assignment, days=days)
             if validated is None:
@@ -183,5 +214,5 @@ def merge_agent_assignments(
         self_duplicate_count=self_duplicate_count,
         invalid_slot_count=invalid_slot_count,
         extra_assignment_count=extra_assignment_count,
-        capacity=cap,
+        capacity=max(resolved_capacities, default=0),
     )

@@ -18,7 +18,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from single_turn.aggregation import PLAN_FIELDS, MergeResult, canonical_value
+from single_turn.aggregation import (
+    PLAN_FIELDS,
+    MergeResult,
+    canonical_value,
+    owned_slots,
+)
 
 
 MEAL_FIELDS = frozenset({"breakfast", "lunch", "dinner"})
@@ -966,13 +971,43 @@ def evaluate_reference_plan(
     hard_micro = hard_pass_count / len(hard_pass)
     hard_macro = float(hard_pass_count == len(hard_pass))
     final_plan_success = float(commonsense_macro and hard_macro)
-    delivered = float(
+    plan_nonempty = float(
         len(plan) == days
         and any(
             canonical_value(row.get(field, "-")) != "-"
             for row in plan
             for field in PLAN_FIELDS
         )
+    )
+    roles_complete = bool(
+        len(result.parsed) == 2
+        and len(result.per_agent_assignments) == 2
+        and all(
+            parsed.parse_success
+            and set(assignments) == owned_slots(agent_idx, days)
+            and len(assignments) == parsed.raw_item_count
+            for agent_idx, (parsed, assignments) in enumerate(
+                zip(result.parsed, result.per_agent_assignments)
+            )
+        )
+    )
+    clean_merge = bool(
+        result.overlap_count == 0
+        and not result.conflict_slots
+        and result.invalid_slot_count == 0
+        and result.self_duplicate_count == 0
+        and result.extra_assignment_count == 0
+    )
+    # Keep the paper-facing delivery metric separate from correctness: it asks
+    # only whether the system handed back a non-empty plan.  The stricter local
+    # completion diagnostic below additionally requires two complete role
+    # actions and a value for every scaffold-required slot.
+    required_plan_completion = float(
+        len(plan) == days
+        and roles_complete
+        and clean_merge
+        and assignment_coverage >= 1.0 - 1e-9
+        and required_fill_rate >= 1.0 - 1e-9
     )
 
     details: Dict[str, Any] = {
@@ -988,7 +1023,9 @@ def evaluate_reference_plan(
         "budget": float(budget),
         "budget_utilization": float(estimated_cost / budget) if budget > 0 else 0.0,
         "cost_complete": float(cost_complete),
-        "ultimate/reference_plan_delivery": delivered,
+        "reference_plan_nonempty": plan_nonempty,
+        "ultimate/reference_plan_delivery": plan_nonempty,
+        "ultimate/required_plan_completion": required_plan_completion,
         "ultimate/reference_grounding": float(grounding_precision >= 1.0 - 1e-9),
         "ultimate/reference_reasonable_route": float(route["pass"]),
         "ultimate/reference_route_scaffold_match": float(

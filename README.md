@@ -83,13 +83,11 @@ agents do not add another factor of two to `env_step`.
 
 Agent 0 owns logistics and feasibility:
 
-- `current_city`, `transportation`, and `accommodation` for every day;
-- `dinner` on even-numbered days.
+- `current_city`, `transportation`, and `accommodation` for every day.
 
 Agent 1 owns daily experience:
 
-- `breakfast`, `attraction`, and `lunch` for every day;
-- `dinner` on odd-numbered days.
+- `breakfast`, `attraction`, `lunch`, and `dinner` for every day.
 
 The partition is exhaustive and disjoint. Each agent emits exactly one JSON
 assignment for every owned slot, including explicit `"-"` values where the
@@ -98,12 +96,17 @@ the assignments without an LLM aggregator.
 
 Both prompts contain the same movement/stay scaffold, derived only from dated
 route descriptions in the reference slice. Agent 0 receives exact
-transportation values, accommodation metadata, and restaurant options needed
-for its even-day dinner duty. Agent 1 receives exact restaurant and attraction
-values. Addresses, coordinates, phone numbers, URLs, and unrelated table
-columns are omitted. The generation adapter also prefills the fixed JSON
-header through the opening quote of the first owned value, so the sampled
-policy starts by choosing task content instead of relearning the outer schema.
+transportation values and accommodation metadata. Agent 1 receives exact
+restaurant and attraction values. Addresses, coordinates, phone numbers, URLs,
+and unrelated table columns are omitted. The generation adapter prefills the
+first assignment and then forces the complete role-owned JSON skeleton. The
+policy chooses only value text and when to close each value; deterministic
+schema tokens are excluded from its loss, and value log probabilities are
+length-normalized. This prevents one bracket mistake—or the length of a
+multi-day JSON response—from dominating a Travel policy update.
+The fixed skeleton is intentionally available only for `partitioned_roles`;
+reference KL is disabled because schema tokens are excluded from this
+domain-specific policy loss.
 
 The plan conventions are stated in both prompts:
 
@@ -223,43 +226,38 @@ training average—is the primary convergence curve.
 ## End metrics
 
 The training reward is a learning signal, not the headline result. A
-reward-independent joint evaluator computes the fixed-evaluation metrics
-directly from the two actions and reference catalog; changing reward weights
-does not change these values. In W&B, the names below appear under
-`eval/turn_1/ultimate/`:
+reward-independent joint evaluator computes diagnostics directly from the two
+actions and reference catalog; changing reward weights does not change them.
+Detailed constraint and parser diagnostics remain available internally, while
+W&B publishes only this compact surface:
 
 | Metric | Definition | Better |
 | --- | --- | :---: |
-| `team_action_success` | Both agents produce strict, correctly owned, complete, conflict-free actions | ↑ |
-| `both_agent_verified_contribution` | Every owned slot from both agents is independently valid | ↑ |
-| `both_agent_required_grounded_contribution` | Both roles ground every structurally required slot they own | ↑ |
-| `conflict_free` | No duplicate or conflicting cross-agent slots | ↑ |
-| `reference_grounding` | Every emitted non-empty entity is found in the appropriate reference catalog | ↑ |
-| `reference_reasonable_route` | Route parses, is continuous, visits the requested city count, and returns home | ↑ |
-| `reference_route_scaffold_match` | Every generated move/stay leg matches the shared reference-derived scaffold | ↑ |
-| `reference_complete_information` | Every team slot is explicitly assigned and every structurally required slot is non-empty | ↑ |
-| `reference_within_current_city` | Every selected entity or transportation option matches that day's city or route | ↑ |
-| `reference_transport_consistency` | Movement days have valid dated transport; stay days do not | ↑ |
-| `reference_restaurant_diversity` | No restaurant is reused | ↑ |
-| `reference_attraction_diversity` | No attraction is reused | ↑ |
-| `reference_minimum_nights` | Consecutive accommodation choices satisfy listed minimum stays | ↑ |
-| `reference_commonsense_micro` | Passed local commonsense checks divided by all local commonsense checks | ↑ |
-| `reference_commonsense_macro` | All local commonsense checks pass for the example | ↑ |
-| `reference_budget_pass` | A complete grounded itinerary has estimated cost within budget | ↑ |
-| `reference_hard_micro` | Passed applicable local hard checks divided by applicable local hard checks | ↑ |
-| `reference_hard_macro` | Every applicable local hard check passes | ↑ |
-| `reference_plan_success` | Both reference commonsense macro and reference hard macro pass | ↑ |
-| `collaboration_success` | Reference plan success plus team action success and full two-agent contribution | ↑ |
+| `eval/reward` | Shared MAGRPO reward | ↑ |
+| `eval/action_validity` | Mean strict validity of the two agent actions | ↑ |
+| `eval/team_action_success` | Both actions are strict, correctly owned, complete, and conflict-free | ↑ |
+| `eval/required_cooperative_contribution` | Weaker role's grounded coverage of its required work | ↑ |
+| `eval/required_grounded_recall` | Grounded required slots divided by all required slots | ↑ |
+| `eval/entity_grounding_precision` | Supported emitted entities divided by emitted entities | ↑ |
+| `eval/grounding_f1` | Harmonic mean of grounding precision and required recall | ↑ |
+| `eval/route_scaffold_match` | Generated move/stay legs matching the reference-derived scaffold | ↑ |
+| `eval/reference_plan_delivery` | A non-empty plan is delivered (paper-style delivery, independent of correctness) | ↑ |
+| `eval/required_plan_completion` | Both strict role actions fill every scaffold-required slot | ↑ |
+| `eval/reference_commonsense_micro` | Passed commonsense checks divided by applicable checks | ↑ |
+| `eval/reference_hard_micro` | Passed hard constraints divided by applicable hard constraints | ↑ |
+| `eval/reference_plan_success` | All commonsense and hard checks pass | ↑ |
+| `eval/collaboration_success` | Plan success plus valid team action and full two-role contribution | ↑ |
 
 The main table should report at least:
 
 ```text
 reward
-reference_commonsense_micro / reference_commonsense_macro
-reference_hard_micro / reference_hard_macro
+reference_plan_delivery
+required_plan_completion
+reference_commonsense_micro
+reference_hard_micro
 reference_plan_success
 team_action_success
-both_agent_verified_contribution
 collaboration_success
 required_cooperative_contribution
 required_grounded_recall
@@ -270,15 +268,14 @@ For paper-style reporting, use `initial / final / delta` columns. The micro and
 dense metrics show incremental learning even when the all-or-nothing final
 success rate remains zero early in training.
 
-Every periodic evaluation also logs `eval/turn_1/eval_samples`, a W&B table
-containing the query, both raw agent actions, merged plan, reward, parser
-errors, and headline end metrics for the four anchor examples. Compact aliases
-such as `eval/reward`, `eval/team_action_success`, and
-`eval/collaboration_success` are logged alongside the full metric tree so
-existing W&B panels do not depend on internal turn prefixes. At the terminal
-20-example evaluation, full-pool values use `eval_full/*`; the first four
-generated rows are also aggregated under `eval/*`, so the last anchor point has
-the same denominator as the rest of that curve.
+Every periodic evaluation also logs one representative anchor example under
+`eval/samples`, containing the query, both raw agent actions, merged plan,
+reward, parser errors, and headline metrics. Per-agent parser series,
+constraint-by-constraint series, duplicate `turn_1` aliases, delta series, and
+the redundant headline table are not uploaded. At the terminal 20-example
+evaluation, the same compact scalar surface uses `eval_full/*`; the first four
+generated rows are still aggregated under `eval/*`, so the last anchor point
+has the same denominator as the rest of that curve.
 
 Training logs expose `train/reward` plus the reward-independent
 `train/team_action_success`, `train/required_cooperative_contribution`,
@@ -288,9 +285,8 @@ Training logs expose `train/reward` plus the reward-independent
 `train/nonzero_advantage_rate`, and `train/meaningful_advantage_rate` show
 whether the four aligned generations still provide an actual MAGRPO ranking
 signal. The corresponding `eval/*` metrics on the fixed anchor are the ones to
-use for initial/final/delta claims.
-`eval/headline_summary` is a W&B table with `initial / current / delta` for the
-fixed anchor, and the same changes are available as `eval/delta/*` scalars.
+use for initial/final/delta claims; compute delta from the first and last curve
+points instead of logging a duplicate metric family.
 
 Easy examples have no cuisine, room-type, house-rule, or transportation
 restriction; medium examples add one such constraint. Hard examples, which

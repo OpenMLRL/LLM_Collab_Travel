@@ -323,7 +323,7 @@ class AggregationTests(unittest.TestCase):
         self.assertIn((1, "lunch"), result.conflict_slots)
         self.assertNotIn((1, "lunch"), result.merged_assignments)
 
-    def test_partition_has_one_balanced_owner_per_slot(self):
+    def test_partition_has_one_role_consistent_owner_per_slot(self):
         for days in (1, 3, 5, 7):
             first = owned_slots(0, days)
             second = owned_slots(1, days)
@@ -332,9 +332,13 @@ class AggregationTests(unittest.TestCase):
             }
             self.assertFalse(first & second)
             self.assertEqual(first | second, all_slots)
-            self.assertLessEqual(abs(len(first) - len(second)), 1)
+            self.assertEqual(len(first), 3 * days)
+            self.assertEqual(len(second), 4 * days)
             self.assertTrue(
                 all(slot_owner(day, field, days) == 0 for day, field in first)
+            )
+            self.assertTrue(
+                all(slot_owner(day, "dinner", days) == 1 for day in range(1, days + 1))
             )
 
 
@@ -356,6 +360,9 @@ class ReferenceRewardTests(unittest.TestCase):
             detail["reward_backend"], "reference_constraint_learnable_v7"
         )
         self.assertEqual(detail["ultimate/reference_plan_success"], 1.0)
+        self.assertEqual(detail["ultimate/reference_plan_delivery"], 1.0)
+        self.assertEqual(detail["ultimate/required_plan_completion"], 1.0)
+        self.assertEqual(detail["reference_plan_nonempty"], 1.0)
         self.assertEqual(detail["ultimate/collaboration_success"], 1.0)
         self.assertEqual(detail["ultimate/team_action_success"], 1.0)
         self.assertEqual(detail["required_grounded_recall"], 1.0)
@@ -401,9 +408,52 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertLess(dash_reward, fake_reward)
         self.assertLess(fake_reward, good_reward)
         self.assertEqual(dash["required_grounded_recall"], 0.0)
+        self.assertEqual(dash["reference_plan_nonempty"], 0.0)
+        self.assertEqual(dash["ultimate/reference_plan_delivery"], 0.0)
+        self.assertEqual(dash["ultimate/required_plan_completion"], 0.0)
         self.assertEqual(dash["ultimate/reference_plan_success"], 0.0)
         self.assertLess(fake["entity_grounding_precision"], 1.0)
+        self.assertEqual(fake["reference_plan_nonempty"], 1.0)
+        self.assertEqual(fake["ultimate/reference_plan_delivery"], 1.0)
+        self.assertEqual(fake["ultimate/required_plan_completion"], 1.0)
         self.assertEqual(fake["ultimate/reference_within_reference"], 0.0)
+
+    def test_required_plan_completion_is_stricter_than_delivery(self):
+        outputs = valid_completions()
+
+        _, recovered = score_single_turn_response(
+            ["prefix\n" + outputs[0], outputs[1]],
+            batch_item=fixture_item(),
+        )
+        self.assertEqual(recovered["reference_plan_nonempty"], 1.0)
+        self.assertEqual(recovered["assignment_coverage"], 1.0)
+        self.assertEqual(recovered["required_fill_rate"], 1.0)
+        self.assertEqual(recovered["ultimate/team_action_success"], 0.0)
+        self.assertEqual(recovered["ultimate/reference_plan_delivery"], 1.0)
+        self.assertEqual(recovered["ultimate/required_plan_completion"], 0.0)
+
+        truncated = '{"agent_id":0,"assignments":['
+        _, one_agent = score_single_turn_response(
+            [truncated, outputs[1]],
+            batch_item=fixture_item(),
+        )
+        self.assertEqual(one_agent["reference_plan_nonempty"], 1.0)
+        self.assertEqual(one_agent["ultimate/reference_plan_delivery"], 1.0)
+        self.assertEqual(one_agent["ultimate/required_plan_completion"], 0.0)
+
+        values = valid_plan_values()
+        values[(2, "breakfast")] = "-"
+        _, missing_required = score_single_turn_response(
+            completions_from_values(values),
+            batch_item=fixture_item(),
+        )
+        self.assertEqual(missing_required["ultimate/team_action_success"], 1.0)
+        self.assertEqual(missing_required["assignment_coverage"], 1.0)
+        self.assertLess(missing_required["required_fill_rate"], 1.0)
+        self.assertEqual(missing_required["ultimate/reference_plan_delivery"], 1.0)
+        self.assertEqual(
+            missing_required["ultimate/required_plan_completion"], 0.0
+        )
 
     def test_wrong_route_and_lazy_agent_are_penalized(self):
         values = valid_plan_values()
@@ -792,13 +842,13 @@ class ReferenceRewardTests(unittest.TestCase):
     def test_conflicted_slot_is_not_a_verified_contribution(self):
         outputs = valid_completions()
         first = json.loads(outputs[0])
-        first["assignments"].append(assignment(1, "breakfast", "Diner, Beta"))
+        first["assignments"][-1] = assignment(1, "breakfast", "Diner, Beta")
         _, detail = score_single_turn_response(
             [json.dumps(first), outputs[1]],
             batch_item=fixture_item(),
         )
         self.assertEqual(detail["conflict_count"], 1.0)
-        self.assertEqual(detail["agent_0/verified_contribution"], 1.0)
+        self.assertLess(detail["agent_0/verified_contribution"], 1.0)
         self.assertLess(detail["agent_1/verified_contribution"], 1.0)
         self.assertEqual(detail["ultimate/both_agent_verified_contribution"], 0.0)
 
@@ -881,7 +931,7 @@ class ReferenceRewardTests(unittest.TestCase):
 
 
 class LoggerTests(unittest.TestCase):
-    def test_eval_logger_emits_ultimate_metrics(self):
+    def test_eval_logger_emits_only_headline_metrics(self):
         item = fixture_item()
         outputs = valid_completions()
         logger = build_single_turn_eval_logger([item])
@@ -892,7 +942,32 @@ class LoggerTests(unittest.TestCase):
             prompts=[item["prompt"]],
         )
         self.assertEqual(metrics[0]["turn_1/ultimate/collaboration_success"], 1.0)
-        self.assertEqual(metrics[0]["turn_1/ultimate/reference_commonsense_macro"], 1.0)
+        self.assertEqual(
+            metrics[0]["turn_1/ultimate/reference_commonsense_micro"], 1.0
+        )
+        public_keys = {
+            key
+            for key in metrics[0]
+            if key.startswith("turn_1/") and "/_aggregate/" not in key
+        }
+        self.assertEqual(
+            public_keys,
+            {
+                "turn_1/action_validity",
+                "turn_1/ultimate/team_action_success",
+                "turn_1/required_cooperative_contribution",
+                "turn_1/required_grounded_recall",
+                "turn_1/entity_grounding_precision",
+                "turn_1/route_scaffold_match_rate",
+                "turn_1/ultimate/reference_plan_delivery",
+                "turn_1/ultimate/required_plan_completion",
+                "turn_1/ultimate/reference_commonsense_micro",
+                "turn_1/ultimate/reference_hard_micro",
+                "turn_1/ultimate/reference_plan_success",
+                "turn_1/ultimate/collaboration_success",
+            },
+        )
+        self.assertNotIn("turn_1/agent_0/parser_error/any", metrics[0])
 
     def test_eval_logger_builds_a_wandb_sample_table(self):
         item = fixture_item()
@@ -907,17 +982,43 @@ class LoggerTests(unittest.TestCase):
             prompts=[item["prompt"]],
         )
         aggregate = aggregate_single_turn_metrics(metrics)
-        self.assertEqual(aggregate["turn_1/eval_panel_id"], 1.0)
-        self.assertEqual(aggregate["turn_1/eval_sample_count"], 1.0)
+        self.assertEqual(
+            set(aggregate),
+            {
+                "turn_1/action_validity",
+                "turn_1/ultimate/team_action_success",
+                "turn_1/required_cooperative_contribution",
+                "turn_1/required_grounded_recall",
+                "turn_1/entity_grounding_precision",
+                "turn_1/grounding_f1",
+                "turn_1/route_scaffold_match_rate",
+                "turn_1/ultimate/reference_plan_delivery",
+                "turn_1/ultimate/required_plan_completion",
+                "turn_1/ultimate/reference_commonsense_micro",
+                "turn_1/ultimate/reference_hard_micro",
+                "turn_1/ultimate/reference_plan_success",
+                "turn_1/ultimate/collaboration_success",
+                "turn_1/eval_samples",
+            },
+        )
         table = aggregate["turn_1/eval_samples"]
         self.assertIn("agent_0_output", table.columns)
         self.assertIn("agent_1_output", table.columns)
         self.assertIn("merged_plan", table.columns)
         self.assertIn("reward", table.columns)
         self.assertIn("protocol_progress", table.columns)
-        self.assertIn("recovered_semantic_balance", table.columns)
         self.assertIn("required_cooperative_contribution", table.columns)
+        self.assertIn("plan_delivery", table.columns)
+        self.assertIn("required_plan_completion", table.columns)
+        self.assertEqual(len(table.data), 1)
         self.assertEqual(table.data[0][table.columns.index("reward")], 1.0)
+        self.assertEqual(
+            table.data[0][table.columns.index("plan_delivery")], 1.0
+        )
+        self.assertEqual(
+            table.data[0][table.columns.index("required_plan_completion")],
+            1.0,
+        )
 
     def test_eval_logger_fails_loudly_on_unknown_prompt(self):
         logger = build_single_turn_eval_logger([fixture_item()])
@@ -1081,6 +1182,8 @@ class DataAndPromptTests(unittest.TestCase):
         self.assertIn("DAILY EXPERIENCE", prompts[1])
         self.assertIn("A travel day requires matching transportation", prompts[0])
         self.assertIn('as "Name, City"', prompts[1])
+        self.assertIn('"assignments" must contain exactly 9 objects', prompts[0])
+        self.assertIn('"assignments" must contain exactly 12 objects', prompts[1])
         self.assertNotIn("annotated", prompts[0].casefold())
         self.assertNotIn("gold", prompts[1].casefold())
 
@@ -1094,9 +1197,7 @@ class DataAndPromptTests(unittest.TestCase):
             '"Flight Number: F100, from Alpha to Beta" | cost=20', logistics
         )
         self.assertIn('"Hotel, Beta" | cost_per_night=100', logistics)
-        # Agent 0 owns even-day dinner, so its compact role catalog must also
-        # expose grounded restaurant choices.
-        self.assertIn('"Cafe, Beta" | average_cost=10', logistics)
+        self.assertNotIn('"Cafe, Beta" | average_cost=10', logistics)
         self.assertNotIn("Museum, Beta", logistics)
 
         self.assertIn('"Cafe, Beta" | average_cost=10', experience)

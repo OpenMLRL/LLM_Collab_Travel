@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -22,8 +23,10 @@ for path in (COMLRL_ROOT, REPO_ROOT):
 
 from comlrl.trainers.reinforce import MAGRPOTrainer
 from single_turn.formatting import build_agent_json_prefill
+from single_turn.aggregation import ordered_owned_slots
 from single_turn.structured_generation import (
     CompleteJSONObjectCriteria,
+    FixedSlotJSONLogitsProcessor,
     GreedyArgmaxLogitsProcessor,
     apply_chat_template,
     with_greedy_argmax_processor,
@@ -38,6 +41,7 @@ class FakeTokenizer:
     chat_template = "fake-template"
     pad_token_id = 0
     eos_token_id = 0
+    all_special_ids = [0]
 
     def __init__(self):
         self.last_messages = None
@@ -100,6 +104,7 @@ class _TinyGenerationTokenizer:
     eos_token_id = 1
     pad_token = "<eos>"
     eos_token = "<eos>"
+    all_special_ids = [0, 1]
 
     def __call__(self, prompts, **kwargs):
         del kwargs
@@ -146,6 +151,21 @@ class _ForceDifferentJSONRows(LogitsProcessor):
         return forced
 
 
+class _PositionIndependentLM(torch.nn.Module):
+    """Tiny differentiable LM for exact policy-loss assertions."""
+
+    def __init__(self, vocab_size=8):
+        super().__init__()
+        self.token_logits = torch.nn.Parameter(torch.arange(vocab_size).float())
+
+    def forward(self, input_ids, attention_mask=None, use_cache=False):
+        del attention_mask, use_cache
+        logits = self.token_logits.view(1, 1, -1).expand(
+            input_ids.shape[0], input_ids.shape[1], -1
+        )
+        return SimpleNamespace(logits=logits)
+
+
 class ChatTemplateTests(unittest.TestCase):
     def test_chat_template_adds_system_user_and_generation_prompt(self):
         tokenizer = FakeTokenizer()
@@ -189,6 +209,200 @@ class ChatTemplateTests(unittest.TestCase):
 
 
 class JSONGenerationConstraintTests(unittest.TestCase):
+    def test_fixed_slot_processor_forces_schema_and_masks_it_from_loss(self):
+        tokenizer = FakeTokenizer()
+        slots = [(1, "current_city"), (1, "transportation")]
+        processor = FixedSlotJSONLogitsProcessor(
+            tokenizer,
+            prompt_length=2,
+            slots=slots,
+            max_value_tokens=8,
+            max_new_tokens=160,
+        )
+        generated = []
+
+        def scores():
+            input_ids = torch.tensor([[2, 3, *generated]], dtype=torch.long)
+            return processor(input_ids, torch.zeros((1, 128)))
+
+        self.assertTrue(torch.isfinite(scores()[0, ord("A")]))
+        generated.append(ord("A"))
+        self.assertTrue(torch.isfinite(scores()[0, ord('"')]))
+        generated.append(ord('"'))
+
+        # This is the exact failed-run boundary. Once the value quote closes,
+        # ']' is impossible and the next skeleton token is forced to '}'.
+        constrained = scores()
+        self.assertEqual(torch.isfinite(constrained).sum().item(), 1)
+        self.assertTrue(torch.isfinite(constrained[0, ord("}")]))
+        self.assertFalse(torch.isfinite(constrained[0, ord("]")]))
+
+        while True:
+            constrained = scores()
+            if processor._states[0].slot_index != 0:
+                break
+            generated.append(int(constrained[0].argmax().item()))
+        generated.extend([ord("-"), ord('"')])
+        while True:
+            constrained = scores()
+            if processor._states[0].mode == "complete":
+                break
+            generated.append(int(constrained[0].argmax().item()))
+
+        generated_tensor = torch.tensor(generated, dtype=torch.long)
+        mask = processor.finalize_loss_masks([generated_tensor])[0]
+        response = build_agent_json_prefill(0, 1) + tokenizer.decode(
+            generated_tensor,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        payload = json.loads(response)
+        self.assertEqual(
+            [(row["day"], row["field"]) for row in payload["assignments"]],
+            slots,
+        )
+        self.assertEqual([row["value"] for row in payload["assignments"]], ["A", "-"])
+        self.assertEqual(sum(mask), 4)
+        self.assertEqual(len(mask), len(generated))
+
+    def test_fixed_slot_processor_forces_a_close_at_value_token_cap(self):
+        tokenizer = FakeTokenizer()
+        processor = FixedSlotJSONLogitsProcessor(
+            tokenizer,
+            prompt_length=2,
+            slots=[(1, "current_city")],
+            max_value_tokens=1,
+            max_new_tokens=16,
+        )
+        first = processor(
+            torch.tensor([[2, 3]], dtype=torch.long), torch.zeros((1, 128))
+        )
+        self.assertTrue(torch.isfinite(first[0, ord("A")]))
+        after_content = processor(
+            torch.tensor([[2, 3, ord("A")]], dtype=torch.long),
+            torch.zeros((1, 128)),
+        )
+        self.assertEqual(torch.isfinite(after_content).sum().item(), 1)
+        self.assertTrue(torch.isfinite(after_content[0, ord('"')]))
+
+    def test_value_choice_reserves_budget_for_a_worst_case_escape(self):
+        tokenizer = FakeTokenizer()
+        processor = FixedSlotJSONLogitsProcessor(
+            tokenizer,
+            prompt_length=2,
+            slots=[(1, "current_city")],
+            max_value_tokens=32,
+            max_new_tokens=6,
+        )
+        generated = []
+        while True:
+            constrained = processor(
+                torch.tensor([[2, 3, *generated]], dtype=torch.long),
+                torch.zeros((1, 128)),
+            )
+            if processor._states[0].mode == "complete":
+                break
+            generated.append(int(constrained[0].argmax().item()))
+
+        self.assertLessEqual(len(generated), 6)
+        generated_tensor = torch.tensor(generated, dtype=torch.long)
+        response = build_agent_json_prefill(0, 1) + tokenizer.decode(
+            generated_tensor,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        self.assertEqual(
+            json.loads(response)["assignments"][0]["value"],
+            "-",
+        )
+
+    def test_fixed_slot_processor_accepts_escaped_catalog_values(self):
+        tokenizer = FakeTokenizer()
+        for catalog_value in ('Yakima "Cruise-the-Ave"', "Line 1\nLine 2"):
+            with self.subTest(catalog_value=catalog_value):
+                processor = FixedSlotJSONLogitsProcessor(
+                    tokenizer,
+                    prompt_length=2,
+                    slots=[(1, "current_city")],
+                    max_value_tokens=64,
+                    max_new_tokens=128,
+                )
+                generated = []
+                # Remove only json.dumps' opening quote. Its escaped contents
+                # and closing quote are exactly what the policy must emit.
+                value_fragment = json.dumps(
+                    catalog_value, ensure_ascii=False
+                )[1:]
+                for character in value_fragment:
+                    constrained = processor(
+                        torch.tensor([[2, 3, *generated]], dtype=torch.long),
+                        torch.zeros((1, 128)),
+                    )
+                    self.assertTrue(
+                        torch.isfinite(constrained[0, ord(character)]),
+                        msg=f"grammar rejected {character!r} in {value_fragment!r}",
+                    )
+                    generated.append(ord(character))
+
+                while True:
+                    constrained = processor(
+                        torch.tensor([[2, 3, *generated]], dtype=torch.long),
+                        torch.zeros((1, 128)),
+                    )
+                    if processor._states[0].mode == "complete":
+                        break
+                    generated.append(int(constrained[0].argmax().item()))
+
+                generated_tensor = torch.tensor(generated, dtype=torch.long)
+                response = build_agent_json_prefill(0, 1) + tokenizer.decode(
+                    generated_tensor,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                self.assertEqual(
+                    json.loads(response)["assignments"][0]["value"],
+                    catalog_value,
+                )
+
+    def test_forced_close_completes_a_partial_json_escape(self):
+        tokenizer = FakeTokenizer()
+        expected_values = {
+            "\\": "\n",
+            "\\u": "\u0000",
+            "\\u1": "\u1000",
+            "\\u12": "\u1200",
+            "\\u123": "\u1230",
+        }
+        for partial_escape, expected_value in expected_values.items():
+            with self.subTest(partial_escape=partial_escape):
+                processor = FixedSlotJSONLogitsProcessor(
+                    tokenizer,
+                    prompt_length=2,
+                    slots=[(1, "current_city")],
+                    max_value_tokens=len(partial_escape),
+                    max_new_tokens=32,
+                )
+                generated = [ord(character) for character in partial_escape]
+                while True:
+                    constrained = processor(
+                        torch.tensor([[2, 3, *generated]], dtype=torch.long),
+                        torch.zeros((1, 128)),
+                    )
+                    if processor._states[0].mode == "complete":
+                        break
+                    generated.append(int(constrained[0].argmax().item()))
+
+                generated_tensor = torch.tensor(generated, dtype=torch.long)
+                response = build_agent_json_prefill(0, 1) + tokenizer.decode(
+                    generated_tensor,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                self.assertEqual(
+                    json.loads(response)["assignments"][0]["value"],
+                    expected_value,
+                )
+
     def test_greedy_eval_processor_resolves_logit_ties_by_argmax(self):
         processor = GreedyArgmaxLogitsProcessor()
         scores = torch.tensor([[5.0, 5.0, 4.0], [1.0, 2.0, 2.0]])
@@ -236,22 +450,32 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 trainer.evaluate(num_eval_samples=1)
         self.assertFalse(trainer._travel_eval_generation)
 
-    def test_travel_eval_metrics_log_samples_and_aliases_in_one_wandb_step(self):
+    def test_travel_eval_logs_only_compact_metrics_in_one_wandb_step(self):
         trainer = object.__new__(StructuredOutputMAGRPOTrainer)
         trainer.eval_logger = lambda **_kwargs: [{"sample_id": "x"}]
         trainer.eval_aggregator = lambda _rows, num_turns: {
             "turn_1/eval_samples": "sample-table",
+            "turn_1/action_validity": 0.5,
             "turn_1/ultimate/team_action_success": 0.5,
+            "turn_1/required_cooperative_contribution": 0.5,
+            "turn_1/required_grounded_recall": 0.5,
+            "turn_1/entity_grounding_precision": 0.5,
+            "turn_1/grounding_f1": 0.5,
+            "turn_1/route_scaffold_match_rate": 0.5,
+            "turn_1/ultimate/reference_plan_delivery": 0.5,
+            "turn_1/ultimate/required_plan_completion": 0.5,
+            "turn_1/ultimate/reference_commonsense_micro": 0.5,
+            "turn_1/ultimate/reference_hard_micro": 0.5,
+            "turn_1/ultimate/reference_plan_success": 0.5,
+            "turn_1/ultimate/collaboration_success": 0.5,
         }
         trainer.args = SimpleNamespace(num_turns=1)
         trainer.wandb_initialized = True
         trainer.env_step = 240
         trainer.rotate_eval_subset = False
-        trainer._travel_eval_baseline = {"reward": 0.5}
         fake_wandb = SimpleNamespace(
             run=object(),
             log=Mock(),
-            Table=lambda **kwargs: kwargs,
         )
 
         with patch(
@@ -266,12 +490,32 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             )
 
         self.assertEqual(metrics["eval/reward"], 0.75)
-        self.assertEqual(metrics["eval/turn_1/reward"], 0.75)
         self.assertEqual(metrics["eval/team_action_success"], 0.5)
-        self.assertEqual(metrics["eval/turn_1/eval_samples"], "sample-table")
-        self.assertEqual(metrics["eval/delta/reward"], 0.25)
-        self.assertIn("eval/headline_summary", metrics)
+        self.assertEqual(metrics["eval/reference_plan_delivery"], 0.5)
+        self.assertEqual(metrics["eval/required_plan_completion"], 0.5)
+        self.assertEqual(metrics["eval/samples"], "sample-table")
+        self.assertEqual(
+            set(metrics),
+            {
+                "eval/reward",
+                "eval/action_validity",
+                "eval/team_action_success",
+                "eval/required_cooperative_contribution",
+                "eval/required_grounded_recall",
+                "eval/entity_grounding_precision",
+                "eval/grounding_f1",
+                "eval/route_scaffold_match",
+                "eval/reference_plan_delivery",
+                "eval/required_plan_completion",
+                "eval/reference_commonsense_micro",
+                "eval/reference_hard_micro",
+                "eval/reference_plan_success",
+                "eval/collaboration_success",
+                "eval/samples",
+            },
+        )
         fake_wandb.log.assert_called_once()
+        self.assertEqual(fake_wandb.log.call_args.args[0], metrics)
         self.assertEqual(fake_wandb.log.call_args.kwargs["step"], 240)
         self.assertTrue(fake_wandb.log.call_args.kwargs["commit"])
 
@@ -283,6 +527,8 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         trainer.eval_aggregator = lambda rows, num_turns: {
             "turn_1/eval_sample_count": float(len(rows)),
             "turn_1/eval_samples": f"table-{len(rows)}",
+            "turn_1/ultimate/reference_plan_delivery": len(rows) / 10.0,
+            "turn_1/ultimate/required_plan_completion": len(rows) / 10.0,
             "turn_1/ultimate/collaboration_success": len(rows) / 10.0,
         }
         trainer.args = SimpleNamespace(num_turns=1, eval_num_samples=2)
@@ -304,14 +550,29 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(metrics["eval/turn_1/eval_sample_count"], 2.0)
-        self.assertEqual(metrics["eval_full/turn_1/eval_sample_count"], 5.0)
-        self.assertEqual(metrics["eval/turn_1/eval_samples"], "table-2")
-        self.assertEqual(metrics["eval_full/turn_1/eval_samples"], "table-5")
-        self.assertAlmostEqual(metrics["eval/turn_1/reward_mean"], 0.05)
-        self.assertEqual(metrics["eval_full/turn_1/reward_mean"], 0.8)
+        self.assertEqual(metrics["eval/samples"], "table-2")
         self.assertEqual(metrics["eval/reward"], 0.05)
         self.assertEqual(metrics["eval_full/reward"], 0.8)
+        self.assertEqual(metrics["eval/reference_plan_delivery"], 0.2)
+        self.assertEqual(metrics["eval_full/reference_plan_delivery"], 0.5)
+        self.assertEqual(metrics["eval/required_plan_completion"], 0.2)
+        self.assertEqual(metrics["eval_full/required_plan_completion"], 0.5)
+        self.assertEqual(metrics["eval/collaboration_success"], 0.2)
+        self.assertEqual(metrics["eval_full/collaboration_success"], 0.5)
+        self.assertEqual(
+            set(metrics),
+            {
+                "eval/reward",
+                "eval/reference_plan_delivery",
+                "eval/required_plan_completion",
+                "eval/collaboration_success",
+                "eval_full/reward",
+                "eval_full/reference_plan_delivery",
+                "eval_full/required_plan_completion",
+                "eval_full/collaboration_success",
+                "eval/samples",
+            },
+        )
         fake_wandb.log.assert_called_once()
         self.assertTrue(fake_wandb.log.call_args.kwargs["commit"])
 
@@ -484,6 +745,187 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         self.assertEqual(result["completions"], [[prefix + suffix]])
         self.assertEqual(result["response_lens"], [len(suffix)])
         self.assertNotIn("completion_loss_mask", result)
+
+    def test_travel_trainer_injects_fixed_skeleton_and_value_loss_mask(self):
+        tokenizer = FakeTokenizer()
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.chat_formatted_prompts = True
+        trainer.force_json_prefix = True
+        trainer.constrain_json_skeleton = True
+        trainer.max_value_tokens = 8
+        trainer.normalize_value_log_probs = True
+        trainer.stop_after_complete_json = True
+        trainer._travel_eval_generation = True
+        trainer.greedy_eval = True
+        trainer.tokenizers = [tokenizer]
+        trainer.formatters = [lambda item, external_prompts=None: item["prompt"]]
+
+        slots = ordered_owned_slots(0, 1)
+        payload = {
+            "agent_id": 0,
+            "assignments": [
+                {"day": day, "field": field, "value": value}
+                for (day, field), value in zip(slots, ("A", "-", "-"))
+            ],
+        }
+        full_response = json.dumps(payload, ensure_ascii=False)
+        prefix = build_agent_json_prefill(0, 1)
+        self.assertTrue(full_response.startswith(prefix))
+        generated_text = full_response[len(prefix) :]
+        generated_tokens = torch.tensor(
+            [ord(character) for character in generated_text], dtype=torch.long
+        )
+
+        with patch.object(
+            MAGRPOTrainer,
+            "_generate_completions",
+            return_value={
+                "prompt_input_ids": torch.tensor([[2, 3]]),
+                "completion_input_ids": [[generated_tokens]],
+                "completion_attention_mask": [[torch.ones(len(generated_tokens))]],
+                "completions": [[generated_text]],
+                "response_lens": [len(generated_tokens)],
+            },
+        ) as generate:
+            result = trainer._generate_completions(
+                object(),
+                [{"prompt": "rendered chat prompt", "days": 1}],
+                agent_idx=0,
+                max_new_tokens=256,
+            )
+
+        processors = generate.call_args.kwargs["logits_processor"]
+        self.assertIsInstance(processors[-2], FixedSlotJSONLogitsProcessor)
+        self.assertIsInstance(processors[-1], GreedyArgmaxLogitsProcessor)
+        self.assertEqual(result["completions"], [[full_response]])
+        loss_mask = result["completion_loss_mask"][0][0]
+        self.assertEqual(loss_mask.numel(), generated_tokens.numel())
+        self.assertEqual(int(loss_mask.sum().item()), 6)
+        self.assertLess(int(loss_mask.sum().item()), loss_mask.numel())
+
+        packed = trainer._pack_completions_for_buffer(result)
+        self.assertEqual(
+            packed["completion_loss_mask"][0][0].tolist(), loss_mask.tolist()
+        )
+
+    def test_real_hf_generate_produces_the_complete_fixed_slot_schema(self):
+        tokenizer = _TinyGenerationTokenizer()
+        model = GPT2LMHeadModel(
+            GPT2Config(
+                vocab_size=128,
+                n_positions=256,
+                n_embd=16,
+                n_layer=1,
+                n_head=1,
+                bos_token_id=0,
+                eos_token_id=1,
+                pad_token_id=1,
+            )
+        )
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.chat_formatted_prompts = True
+        trainer.force_json_prefix = True
+        trainer.constrain_json_skeleton = True
+        trainer.max_value_tokens = 1
+        trainer.normalize_value_log_probs = True
+        trainer.stop_after_complete_json = True
+        trainer._travel_eval_generation = True
+        trainer.greedy_eval = True
+        trainer.tokenizer = tokenizer
+        trainer.tokenizers = [tokenizer]
+        trainer.formatters = [lambda item, external_prompts=None: "chat-rendered"]
+        trainer.args = SimpleNamespace(
+            temperature=0.7,
+            top_p=0.8,
+            top_k=None,
+            reference_kl_enabled=False,
+        )
+        trainer.reference_models = []
+
+        result = trainer._generate_completions(
+            model,
+            [{"prompt": "ignored", "days": 1}],
+            agent_idx=0,
+            num_return_sequences=2,
+            max_new_tokens=192,
+        )
+
+        expected_slots = ordered_owned_slots(0, 1)
+        self.assertEqual(len(result["completions"][0]), 2)
+        for response in result["completions"][0]:
+            payload = json.loads(response)
+            self.assertEqual(payload["agent_id"], 0)
+            self.assertEqual(
+                [
+                    (assignment["day"], assignment["field"])
+                    for assignment in payload["assignments"]
+                ],
+                expected_slots,
+            )
+        for mask, tokens in zip(
+            result["completion_loss_mask"][0],
+            result["completion_input_ids"][0],
+        ):
+            self.assertEqual(mask.numel(), tokens.numel())
+            self.assertEqual(int(mask.sum().item()), len(expected_slots))
+
+    def test_travel_policy_loss_ignores_schema_tokens_and_normalizes_values(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.args = SimpleNamespace(
+            advantage_normalization=False,
+            reference_kl_enabled=False,
+            reference_kl_coef=0.1,
+        )
+        trainer.advantage_mode = "mean"
+        trainer.normalize_value_log_probs = True
+        model = _PositionIndependentLM()
+        completions_data = {
+            "prompt_input_ids": torch.tensor([[0, 1]], dtype=torch.long),
+            "completion_input_ids": [
+                [
+                    torch.tensor([2, 3, 4, 5], dtype=torch.long),
+                    torch.tensor([2, 3], dtype=torch.long),
+                ]
+            ],
+            "completion_loss_mask": [
+                [
+                    torch.tensor([1, 0, 0, 1], dtype=torch.bool),
+                    torch.tensor([1, 1], dtype=torch.bool),
+                ]
+            ],
+            "reference_kls": [],
+        }
+        loss = trainer._compute_loss_with_gradients(
+            model, completions_data, returns=[1.0, -1.0]
+        )
+        log_probs = torch.log_softmax(model.token_logits, dim=-1)
+        expected = (
+            -((log_probs[2] + log_probs[5]) / 2.0)
+            + ((log_probs[2] + log_probs[3]) / 2.0)
+        ) / 2.0
+        self.assertTrue(torch.allclose(loss, expected))
+        loss.backward()
+        self.assertTrue(torch.isfinite(model.token_logits.grad).all())
+
+    def test_travel_policy_loss_rejects_a_misaligned_value_mask(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.args = SimpleNamespace(
+            advantage_normalization=False,
+            reference_kl_enabled=False,
+            reference_kl_coef=0.1,
+        )
+        trainer.advantage_mode = "mean"
+        trainer.normalize_value_log_probs = True
+        completions_data = {
+            "prompt_input_ids": torch.tensor([[0, 1]], dtype=torch.long),
+            "completion_input_ids": [[torch.tensor([2, 3], dtype=torch.long)]],
+            "completion_loss_mask": [[torch.tensor([1], dtype=torch.bool)]],
+            "reference_kls": [],
+        }
+        with self.assertRaisesRegex(ValueError, "must have equal length"):
+            trainer._compute_loss_with_gradients(
+                _PositionIndependentLM(), completions_data, returns=[1.0]
+            )
 
     def test_real_hf_generate_crops_each_stopped_sequence_before_padded_eos(self):
         tokenizer = _TinyGenerationTokenizer()
@@ -679,6 +1121,7 @@ class TravelCurriculumTests(unittest.TestCase):
                 "strict_composite_quality": value,
                 "protocol_progress": 1.0,
                 "recovered_semantic_balance": value,
+                "ultimate/required_plan_completion": value,
                 "ultimate/collaboration_success": 0.0,
             }
             for value in (0.2, 0.4, 0.6, 0.8)
@@ -702,6 +1145,7 @@ class TravelCurriculumTests(unittest.TestCase):
         self.assertAlmostEqual(
             record["train/required_cooperative_contribution"], 0.5
         )
+        self.assertAlmostEqual(record["train/required_plan_completion"], 0.5)
         self.assertEqual(record["train/curriculum_stage"], 0.0)
 
     def test_train_reward_diagnostics_are_attached_to_agent_zero_log(self):

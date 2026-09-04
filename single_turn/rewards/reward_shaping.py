@@ -238,7 +238,14 @@ def _synthetic_merge(
             ],
         }
         completions.append(json.dumps(payload, ensure_ascii=False))
-    return merge_agent_assignments(completions, days=days)
+    capacities = [
+        len(owned_slots(agent_idx, days)) for agent_idx in range(len(completions))
+    ]
+    return merge_agent_assignments(
+        completions,
+        days=days,
+        capacities=capacities,
+    )
 
 
 def _slot_value_is_grounded(

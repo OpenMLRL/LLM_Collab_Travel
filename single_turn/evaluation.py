@@ -53,7 +53,12 @@ def evaluate_single_turn_response(
     if len(agent_completions) != 2:
         raise ValueError("The role-partitioned Travel task requires exactly 2 agents.")
 
-    result = merge_agent_assignments(agent_completions, days=days)
+    role_capacities = [len(owned_slots(agent_idx, days)) for agent_idx in range(2)]
+    result = merge_agent_assignments(
+        agent_completions,
+        days=days,
+        capacities=role_capacities,
+    )
     strict_format_score = sum(
         float(parsed.parse_success) for parsed in result.parsed
     ) / len(result.parsed)
@@ -244,7 +249,7 @@ def evaluate_single_turn_response(
         "ultimate/collaboration_success": collaboration_success,
         "merged_plan": result.plan,
         "parser_errors": [list(parsed.error_codes) for parsed in result.parsed],
-        "evaluation_backend": "reference_constraint_scaffold_v2",
+        "evaluation_backend": "reference_constraint_scaffold_v3_completion_metrics",
         **plan_detail,
     }
 

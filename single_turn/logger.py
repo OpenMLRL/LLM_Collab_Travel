@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from numbers import Real
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 import numpy as np
@@ -15,12 +14,43 @@ def _prompt_key(prompt: str) -> str:
     return " ".join((prompt or "").split()).strip()
 
 
-def _scalarize_reward_details(detail: Dict[str, Any]) -> Dict[str, float]:
-    """Keep dense scalars; internal counts are consumed by the aggregator."""
+_EVAL_SCALAR_KEYS = (
+    "action_validity",
+    "ultimate/team_action_success",
+    "required_cooperative_contribution",
+    "required_grounded_recall",
+    "entity_grounding_precision",
+    "route_scaffold_match_rate",
+    "ultimate/reference_plan_delivery",
+    "ultimate/required_plan_completion",
+    "ultimate/reference_commonsense_micro",
+    "ultimate/reference_hard_micro",
+    "ultimate/reference_plan_success",
+    "ultimate/collaboration_success",
+)
 
-    return {
-        key: float(value) for key, value in detail.items() if isinstance(value, Real)
-    }
+# These counts stay inside the evaluator/aggregator boundary.  They are needed
+# to compute correct micro averages, but are deliberately never sent to W&B.
+_AGGREGATE_SUPPORT_KEYS = (
+    "_aggregate/commonsense_pass_count",
+    "_aggregate/commonsense_applicable_count",
+    "_aggregate/hard_pass_count",
+    "_aggregate/hard_applicable_count",
+    "_aggregate/required_valid_count",
+    "_aggregate/required_slot_count",
+    "_aggregate/grounded_entity_count",
+    "_aggregate/predicted_entity_count",
+)
+
+
+def _scalarize_reward_details(detail: Dict[str, Any]) -> Dict[str, float]:
+    """Select only headline eval metrics plus hidden micro-average counts."""
+
+    keys = (*_EVAL_SCALAR_KEYS, *_AGGREGATE_SUPPORT_KEYS)
+    missing = [key for key in keys if key not in detail]
+    if missing:
+        raise KeyError(f"Evaluator omitted required metrics: {missing}")
+    return {key: float(detail[key]) for key in keys}
 
 
 def build_single_turn_eval_logger(
@@ -64,13 +94,6 @@ def build_single_turn_eval_logger(
             for agent_idx in range(len(agent_completions_turns)):
                 per_sample = agent_completions_turns[agent_idx][sample_idx]
                 completions.append(per_sample[0] if per_sample else "")
-            detail = evaluate_single_turn_response(
-                completions,
-                batch_item=row,
-            )
-            sample_metrics: Dict[str, Any] = {"sample_id": row.get("id", sample_idx)}
-            for key, value in _scalarize_reward_details(detail).items():
-                sample_metrics[f"turn_1/{key}"] = value
             reward_value = None
             reward_detail: Dict[str, Any] = {}
             if reward_config is not None:
@@ -85,22 +108,20 @@ def build_single_turn_eval_logger(
                     batch_item=row,
                     config=reward_config,
                 )
-                reward_metric_keys = (
-                    "plan_score",
-                    "strict_composite_quality",
-                    "protocol_progress",
-                    "recovered_semantic_balance",
-                    "recovered_plan_score",
-                    "recovered_composite_quality",
+                # The reward scorer already returns the complete evaluator
+                # detail.  Reuse it instead of evaluating the same plan twice.
+                detail = reward_detail
+            else:
+                detail = evaluate_single_turn_response(
+                    completions,
+                    batch_item=row,
                 )
-                for key in reward_metric_keys:
-                    sample_metrics[f"turn_1/reward_model/{key}"] = float(
-                        reward_detail[key]
-                    )
+            sample_metrics: Dict[str, Any] = {"sample_id": row.get("id", sample_idx)}
+            for key, value in _scalarize_reward_details(detail).items():
+                sample_metrics[f"turn_1/{key}"] = value
             sample_metrics["_eval_sample"] = {
                 "panel_id": panel_by_prompt[_prompt_key(prompt)],
                 "sample_id": str(row.get("id", sample_idx)),
-                "level": str(row.get("level", "")),
                 "days": int(row.get("days", 0)),
                 "query": str(row.get("query") or row.get("prompt") or ""),
                 "agent_0_output": completions[0],
@@ -110,39 +131,21 @@ def build_single_turn_eval_logger(
                 ),
                 "reward": reward_value,
                 "plan_score": reward_detail.get("plan_score"),
-                "strict_composite_quality": reward_detail.get(
-                    "strict_composite_quality"
-                ),
                 "protocol_progress": reward_detail.get("protocol_progress"),
-                "recovered_semantic_balance": reward_detail.get(
-                    "recovered_semantic_balance"
-                ),
-                "recovered_plan_score": reward_detail.get(
-                    "recovered_plan_score"
-                ),
-                "recovered_composite_quality": reward_detail.get(
-                    "recovered_composite_quality"
-                ),
                 "action_validity": detail["action_validity"],
                 "team_action_success": detail["ultimate/team_action_success"],
-                "both_agent_verified": detail[
-                    "ultimate/both_agent_verified_contribution"
-                ],
-                "both_agent_required_grounded": detail[
-                    "ultimate/both_agent_required_grounded_contribution"
-                ],
                 "required_cooperative_contribution": detail[
                     "required_cooperative_contribution"
-                ],
-                "agent_0_required_contribution": detail[
-                    "agent_0/required_grounded_contribution"
-                ],
-                "agent_1_required_contribution": detail[
-                    "agent_1/required_grounded_contribution"
                 ],
                 "required_grounded_recall": detail["required_grounded_recall"],
                 "grounding_precision": detail["entity_grounding_precision"],
                 "route_scaffold_match": detail["route_scaffold_match_rate"],
+                "plan_delivery": detail[
+                    "ultimate/reference_plan_delivery"
+                ],
+                "required_plan_completion": detail[
+                    "ultimate/required_plan_completion"
+                ],
                 "commonsense_micro": detail[
                     "ultimate/reference_commonsense_micro"
                 ],
@@ -230,13 +233,6 @@ def aggregate_single_turn_metrics(
         if isinstance(sample.get("_eval_sample"), Mapping)
     ]
     if sample_rows:
-        panel_ids = sorted({int(row["panel_id"]) for row in sample_rows})
-        aggregated["turn_1/eval_sample_count"] = float(len(sample_rows))
-        # Zero means the terminal evaluation spans more than one panel.
-        aggregated["turn_1/eval_panel_id"] = float(
-            panel_ids[0] if len(panel_ids) == 1 else 0
-        )
-        aggregated["turn_1/eval_panel_count"] = float(len(panel_ids))
         try:
             import wandb
         except ImportError:
@@ -245,7 +241,6 @@ def aggregate_single_turn_metrics(
             columns = [
                 "panel_id",
                 "sample_id",
-                "level",
                 "days",
                 "query",
                 "agent_0_output",
@@ -253,21 +248,15 @@ def aggregate_single_turn_metrics(
                 "merged_plan",
                 "reward",
                 "plan_score",
-                "strict_composite_quality",
                 "protocol_progress",
-                "recovered_semantic_balance",
-                "recovered_plan_score",
-                "recovered_composite_quality",
                 "action_validity",
                 "team_action_success",
-                "both_agent_verified",
-                "both_agent_required_grounded",
                 "required_cooperative_contribution",
-                "agent_0_required_contribution",
-                "agent_1_required_contribution",
                 "required_grounded_recall",
                 "grounding_precision",
                 "route_scaffold_match",
+                "plan_delivery",
+                "required_plan_completion",
                 "commonsense_micro",
                 "hard_micro",
                 "reference_plan_success",
@@ -276,6 +265,11 @@ def aggregate_single_turn_metrics(
             ]
             aggregated["turn_1/eval_samples"] = wandb.Table(
                 columns=columns,
-                data=[[row.get(column) for column in columns] for row in sample_rows],
+                # Scalar metrics use the complete eval subset.  Upload one
+                # representative collaboration trace per checkpoint to avoid
+                # repeatedly shipping four long prompts and generations.
+                data=[
+                    [sample_rows[0].get(column) for column in columns]
+                ],
             )
     return aggregated

@@ -52,10 +52,15 @@ travel:
     You are one agent in a decentralized travel-planning team. Follow the user's
     role and output contract exactly. Return only the requested JSON object.
     Close the assignments array with ] before the final top-level }.
-  # Strict decoding prefills the fixed JSON schema through the opening quote of
-  # each role's first value (not sampled policy tokens), then stops each
-  # sequence independently at its matching top-level "}".
+  # Strict decoding prefills the first assignment and then forces every later
+  # day/field/key/delimiter. The policy chooses only slot values and when to
+  # close them; fixed schema tokens are excluded from the Travel policy loss.
   force_json_prefix: true
+  constrain_json_skeleton: true
+  max_value_tokens: 32
+  # Average over freely selected value tokens instead of summing hundreds of
+  # completion-token log probabilities into one oversized policy update.
+  normalize_value_log_probs: true
   stop_after_complete_json: true
   # Periodic eval uses greedy argmax on the fixed P1 anchor; training remains
   # stochastic with the model sampling settings above.
@@ -139,7 +144,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-learnable-v7-60train
+  name: Travel-magrpo-qwen3-4b-fixed-skeleton-v8-60train
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -149,6 +154,7 @@ wandb:
   - decentralized
   - role-guided
   - reward-v7-learnable
+  - fixed-skeleton-v8
   - two-stage-3day-curriculum
   - greedy-fixed-anchor
   - compact-role-catalogs

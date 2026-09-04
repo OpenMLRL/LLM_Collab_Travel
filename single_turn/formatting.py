@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from single_turn.aggregation import PLAN_FIELDS, assignment_capacity, owned_slots
+from single_turn.aggregation import (
+    PLAN_FIELDS,
+    assignment_capacity,
+    ordered_owned_slots,
+)
 from single_turn.rewards.reference_evaluator import (
     CatalogEntry,
     ReferenceCatalog,
@@ -20,10 +24,7 @@ from single_turn.structured_generation import (
 
 
 def _first_owned_slot(agent_idx: int, days: int) -> Tuple[int, str]:
-    slots = sorted(
-        owned_slots(agent_idx, days),
-        key=lambda slot: (slot[0], PLAN_FIELDS.index(slot[1])),
-    )
+    slots = ordered_owned_slots(agent_idx, days)
     if not slots:
         raise ValueError("A Travel agent must own at least one itinerary slot.")
     return slots[0]
@@ -177,10 +178,6 @@ def _render_logistics_catalog(catalog: ReferenceCatalog) -> str:
             f" | minimum_nights={_number(entry.minimum_nights)}"
             f" | maximum_occupancy={_number(entry.maximum_occupancy)}"
         )
-    # Agent 0 owns dinner on even-numbered days, so logistics still needs the
-    # restaurant catalog. Without it, a strict role-following policy cannot
-    # ground every slot it owns.
-    lines.extend(["", _render_restaurant_catalog(catalog)])
     return "\n".join(lines)
 
 
@@ -253,17 +250,16 @@ def _role_instruction(agent_idx: int, role_mode: str, days: int) -> str:
     if role_mode == "partitioned_roles" and agent_idx == 0:
         return (
             "You own LOGISTICS AND FEASIBILITY: current_city, transportation, and "
-            "accommodation on every day, plus dinner on even-numbered days. Submit every owned "
+            "accommodation on every day. Submit every owned "
             "slot, including an explicit '-' when the itinerary convention permits it to be empty. Do not "
-            "submit breakfast, attraction, lunch, or odd-day dinner slots owned by Agent 1."
+            "submit breakfast, attraction, lunch, or dinner slots owned by Agent 1."
         )
     if role_mode == "partitioned_roles" and agent_idx == 1:
         return (
-            "You own DAILY EXPERIENCE: breakfast, attraction, and lunch on every day, "
-            "plus dinner on odd-numbered days. Submit every "
+            "You own DAILY EXPERIENCE: breakfast, attraction, lunch, and dinner on every day. "
+            "Submit every "
             "owned slot, including an explicit '-' when the itinerary convention permits it to be empty. "
-            "Do not submit current_city, transportation, accommodation, or even-day "
-            "dinner slots owned by Agent 0."
+            "Do not submit current_city, transportation, or accommodation slots owned by Agent 0."
         )
 
     if agent_idx == 0:
@@ -304,16 +300,17 @@ def build_single_turn_formatter(
         del external_prompts
         days = int(example.get("days", 0))
         total_slots = len(PLAN_FIELDS) * days
-        capacity = assignment_capacity(days, num_agents)
         reference = build_compact_reference_context(example, agent_idx)
         role = _role_instruction(agent_idx, role_mode, days)
         owned = (
-            sorted(
-                owned_slots(agent_idx, days),
-                key=lambda slot: (slot[0], PLAN_FIELDS.index(slot[1])),
-            )
+            ordered_owned_slots(agent_idx, days)
             if role_mode == "partitioned_roles"
             else []
+        )
+        capacity = assignment_capacity(
+            days,
+            num_agents,
+            agent_idx=agent_idx if role_mode == "partitioned_roles" else None,
         )
         target_count = len(owned) if owned else capacity
         owned_slot_text = (
@@ -337,21 +334,23 @@ def build_single_turn_formatter(
             generation_contract = f"""- The generation system has already written the ASSISTANT PREFILL below. It is
   part of your response, so do not repeat any portion of it.
 - The prefill ends immediately after the opening quote of your first owned value.
-  Continue with that value's contents, close its quote and assignment object, then
-  emit all remaining owned assignments in the listed order.
-- The complete reconstructed response must begin exactly with the prefill and obey
-  the same JSON schema and assignment count.
-- After the final assignment object's "}}", close the assignments array before
-  closing the top-level object. Never emit the top-level "}}" while the array is open.
-- Your response must end exactly with these two characters (with nothing after them):
-  ]}}
+  Generate only that value's contents, then close the value with a double quote.
+- After each closing value quote, the generation system supplies the next fixed
+  assignment object in YOUR OWNED SLOTS order. It fixes every day, field, key,
+  comma, bracket, and brace; you choose only each value.
+- Do not try to generate the next assignment's schema yourself. Immediately continue
+  inside the next already-open value string. The system closes the JSON object after
+  the final owned value.
+- A per-value token limit prevents one slot from consuming the whole response budget.
+  Keep every value concise and copy catalog spelling exactly.
+- The reconstructed response always has the fixed schema and assignment count shown
+  above. Semantic omissions and invalid values still receive low reward.
 
 ASSISTANT PREFILL (already supplied; do not repeat it):
 {assistant_prefill}
 
 Continue the prefilled JSON now. Your first generated character is the first
-character inside the already-open value string. Stop immediately after the
-matching top-level closing "}}"."""
+character inside the already-open value string."""
         else:
             generation_contract = f"""- Your response must begin exactly with this character sequence:
   {{"agent_id": {agent_idx}, "assignments": [
