@@ -132,17 +132,19 @@ def _plan_quality(
     support = config.grounding_support_floor + (
         1.0 - config.grounding_support_floor
     ) * grounding
-    quality = (
-        support
-        * config.assignment_coverage_weight
-        * float(metrics["assignment_coverage"])
-        + config.required_grounded_weight * grounding
-        + config.grounding_f1_weight * float(metrics["grounding_f1"])
-        + support
-        * (
-            config.commonsense_weight * float(metrics["commonsense_soft"])
-            + config.hard_constraint_weight
-            * float(metrics["hard_constraint_soft"])
+    quality = math.fsum(
+        (
+            support
+            * config.assignment_coverage_weight
+            * float(metrics["assignment_coverage"]),
+            config.required_grounded_weight * grounding,
+            config.grounding_f1_weight * float(metrics["grounding_f1"]),
+            support
+            * config.commonsense_weight
+            * float(metrics["commonsense_soft"]),
+            support
+            * config.hard_constraint_weight
+            * float(metrics["hard_constraint_soft"]),
         )
     )
     return float(quality), float(support)
@@ -323,11 +325,32 @@ def score_single_turn_response(
         * shaping.details["reference_copy_rate"],
         "overlong": cfg.overlong_penalty * shaping.details["overlong_rate"],
     }
-    unclamped_reward = sum(positive_components.values()) - sum(
-        penalty_components.values()
+    unclamped_reward = math.fsum(
+        (
+            *positive_components.values(),
+            *(-value for value in penalty_components.values()),
+        )
     )
-    reward = unclamped_reward
-    reward = _clamp(reward, cfg.min_reward, cfg.max_reward)
+    perfect_endpoint = (
+        final_success == 1.0
+        and strict_validity == 1.0
+        and joint_validity == 1.0
+        and semantic_contribution == 1.0
+        and strict_grounding == 1.0
+        and protocol_progress == 1.0
+        and recovered_semantic_balance == 1.0
+        and plan_score == 1.0
+        and recovered_plan_score == 1.0
+        and all(value == 0.0 for value in penalty_components.values())
+    )
+    if (
+        perfect_endpoint
+        and abs(unclamped_reward - 1.0) <= 8 * math.ulp(1.0)
+    ):
+        # Keep the semantic maximum stable across Python versions without
+        # rounding genuinely near-perfect samples up to a perfect score.
+        unclamped_reward = 1.0
+    reward = _clamp(unclamped_reward, cfg.min_reward, cfg.max_reward)
 
     reward_detail = {
         **detail,

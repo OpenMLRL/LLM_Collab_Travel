@@ -871,6 +871,9 @@ class ReferenceRewardTests(unittest.TestCase):
         )
         self.assertEqual(rewards, [1.0])
         self.assertEqual(reward_model.last_details[0]["reward"], 1.0)
+        self.assertEqual(
+            reward_model.last_details[0]["unclamped_reward"], 1.0
+        )
         pending = reward_model.drain_details()
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["reward"], 1.0)
