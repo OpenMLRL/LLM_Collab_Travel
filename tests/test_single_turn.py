@@ -1476,6 +1476,44 @@ class DataAndPromptTests(unittest.TestCase):
         self.assertIn("days=none", motel_line)
         self.assertIn("eligible=no", motel_line)
 
+    def test_prompt_and_budget_use_evaluator_first_duplicate_entity(self):
+        records = reference_records()
+        restaurant_record = next(
+            record
+            for record in records
+            if record["Description"] == "Restaurants in Beta"
+        )
+        restaurant_record["Content"] = (
+            "Name Average Cost Cuisines Aggregate Rating City\n"
+            "Burger King 98 Pizza 4.0 Beta\n"
+            "Burger King 13 Indian 4.1 Beta\n"
+            "Cafe 20 Indian 4.2 Beta\n"
+            "Diner 15 American 4.3 Beta"
+        )
+        item = fixture_item()
+        item["reference_information"] = repr(records)
+        item["reference_records"] = records
+        item["local_constraint"] = {
+            **item["local_constraint"],
+            "cuisine": ["Indian"],
+        }
+
+        contract = build_role_budget_contract(item)
+        self.assertTrue(contract.feasible)
+        # The evaluator maps the copyable value to the first Burger King row.
+        # Three distinct meals therefore cost 98 + 20 + 15, not 13 + 20 + 15.
+        self.assertEqual(contract.experience_floor_cents, 13_300)
+        experience = get_single_turn_formatters(num_agents=2)[1](item)
+        burger_lines = [
+            line
+            for line in experience.splitlines()
+            if line.startswith('- "Burger King, Beta"')
+        ]
+        self.assertEqual(len(burger_lines), 1)
+        self.assertIn("team_cost_per_meal=98.00", burger_lines[0])
+        self.assertIn("cuisines=Pizza", burger_lines[0])
+        self.assertNotIn("team_cost_per_meal=13.00", experience)
+
     def test_role_prompts_explain_reference_free_contract(self):
         item = fixture_item()
         prompts = [

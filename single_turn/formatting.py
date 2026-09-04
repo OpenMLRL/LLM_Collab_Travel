@@ -119,6 +119,24 @@ def _entry_cost_cents(entry: CatalogEntry, people: int) -> int | None:
     return _money_cents(scaled_party_cost(entry, people))
 
 
+def _first_per_evaluator_identity(
+    entries: Iterable[CatalogEntry],
+) -> List[CatalogEntry]:
+    """Mirror ``match_entity``: the first catalog row owns each copy value.
+
+    Restaurant, attraction, and accommodation values expose only ``Name, City``.
+    Later rows with the same evaluator identity therefore cannot be distinguished
+    by either policy and must not influence prompt metadata or budget floors.
+    Transportation is deliberately excluded because its copied value also carries
+    mode/flight number and route.
+    """
+
+    first: Dict[Tuple[str, str, str], CatalogEntry] = {}
+    for entry in entries:
+        first.setdefault(entry.identity, entry)
+    return list(first.values())
+
+
 def _cost_sort_key(value: int | None) -> int:
     return value if value is not None else 10**18
 
@@ -294,7 +312,7 @@ def _minimum_accommodation_cost(
     total = 0
     for city, nights in runs:
         candidates: List[int] = []
-        for entry in catalog.accommodations:
+        for entry in _first_per_evaluator_identity(catalog.accommodations):
             cost = _entry_cost_cents(entry, people)
             if (
                 canonical_value(entry.city) == canonical_value(city)
@@ -335,24 +353,13 @@ def _minimum_experience_cost(
 
     global_costs: Dict[int, int] = {0: 0}
     for city, required_count in meal_counts.values():
-        by_identity: Dict[Tuple[str, str, str], CatalogEntry] = {}
-        for entry in catalog.restaurants:
-            if canonical_value(entry.city) != canonical_value(city):
-                continue
-            previous = by_identity.get(entry.identity)
-            previous_cost = (
-                _entry_cost_cents(previous, people)
-                if previous is not None
-                else None
-            )
-            entry_cost = _entry_cost_cents(entry, people)
-            if previous is None or (
-                entry_cost is not None
-                and (previous_cost is None or entry_cost < previous_cost)
-            ):
-                by_identity[entry.identity] = entry
+        entries = _first_per_evaluator_identity(
+            entry
+            for entry in catalog.restaurants
+            if canonical_value(entry.city) == canonical_value(city)
+        )
         entries = sorted(
-            by_identity.values(), key=lambda entry: entry.name.casefold()
+            entries, key=lambda entry: entry.name.casefold()
         )
         city_costs: Dict[Tuple[int, int], int] = {(0, 0): 0}
         for entry in entries:
@@ -569,7 +576,7 @@ def _render_restaurant_catalog(
         return tuple(sorted(requested & available))
 
     restaurants = _unique_sorted(
-        catalog.restaurants,
+        _first_per_evaluator_identity(catalog.restaurants),
         key=lambda entry: (
             entry.city.casefold(),
             not bool(
@@ -654,7 +661,7 @@ def _render_logistics_catalog(
         ),
     )
     accommodations = _unique_sorted(
-        catalog.accommodations,
+        _first_per_evaluator_identity(catalog.accommodations),
         key=lambda entry: (
             entry.city.casefold(),
             not accommodation_eligible(entry),
@@ -710,7 +717,7 @@ def _render_experience_catalog(
     scaffold: Sequence[Tuple[str, str, str]],
 ) -> str:
     attractions = _unique_sorted(
-        catalog.attractions,
+        _first_per_evaluator_identity(catalog.attractions),
         key=lambda entry: (entry.city.casefold(), entry.name.casefold()),
     )
     lines = [
