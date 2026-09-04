@@ -71,9 +71,9 @@ travel:
   curriculum_days: [3]
 
 travel_reward:
-  # Reward v7 reserves 91% of its positive range for strict joint quality and
-  # final success. The two 0.02/0.03 dense channels make early malformed
-  # rollouts rankable but cannot substitute for a valid team action.
+  # Reward v8 keeps the successful strict joint weights from v7 while the
+  # evaluator supplies dense cost-completeness and over-budget progress.
+  # The two 0.02/0.03 malformed-output channels remain tightly bounded.
   protocol_progress_weight: 0.02
   recovered_semantic_weight: 0.03
   action_validity_weight: 0.04
@@ -144,7 +144,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-fixed-skeleton-v8-60train
+  name: Travel-magrpo-qwen3-4b-hard-budget-v9-60train
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -153,7 +153,8 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
-  - reward-v7-learnable
+  - reward-v8-budget-dense
+  - hard-aware-budget-contract
   - fixed-skeleton-v8
   - two-stage-3day-curriculum
   - greedy-fixed-anchor

@@ -30,6 +30,7 @@ MEAL_FIELDS = frozenset({"breakfast", "lunch", "dinner"})
 ENTITY_FIELDS = frozenset(
     {"breakfast", "lunch", "dinner", "attraction", "accommodation"}
 )
+COST_FIELDS = frozenset((*MEAL_FIELDS, "transportation", "accommodation"))
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,68 @@ class ReferenceCatalog:
                 cities.add(canonical_value(entry.destination))
         cities.discard("-")
         return frozenset(cities)
+
+
+def scaled_party_cost(entry: CatalogEntry, people: int) -> float | None:
+    """Return the evaluator cost of one selected catalog occurrence.
+
+    This public helper is shared by prompt construction and scoring so the
+    decentralized budget contract cannot drift away from the hard evaluator.
+    """
+
+    if entry.cost is None:
+        return None
+    party_size = max(1, int(people or 1))
+    if entry.category == "transportation":
+        if entry.mode == "flight":
+            multiplier = party_size
+        elif entry.mode == "taxi":
+            multiplier = math.ceil(party_size / 4)
+        else:
+            multiplier = math.ceil(party_size / 5)
+        return float(entry.cost * multiplier)
+    if entry.category == "restaurant":
+        return float(entry.cost * party_size)
+    if entry.category == "accommodation":
+        return float(
+            entry.cost * math.ceil(party_size / max(1.0, entry.maximum_occupancy))
+        )
+    return float(entry.cost)
+
+
+def accommodation_satisfies_room_type(
+    entry: CatalogEntry, requested: Any
+) -> bool:
+    if not requested:
+        return True
+    actual = canonical_value(entry.room_type)
+    required = canonical_value(requested)
+    if required == "not shared room":
+        return actual != "shared room"
+    if required == "entire room":
+        return actual == "entire home/apt"
+    return actual == required
+
+
+def accommodation_satisfies_house_rule(
+    entry: CatalogEntry, requested: Any
+) -> bool:
+    if not requested:
+        return True
+    forbidden = f"no {canonical_value(requested)}"
+    return forbidden not in canonical_value(entry.house_rules)
+
+
+def transportation_satisfies_rule(
+    entry: CatalogEntry, requested: Any
+) -> bool:
+    if not requested:
+        return True
+    forbidden = {
+        "no flight": "flight",
+        "no self-driving": "self-driving",
+    }.get(canonical_value(requested))
+    return forbidden is not None and entry.mode != forbidden
 
 
 def _safe_records(raw: str) -> List[Dict[str, Any]]:
@@ -667,6 +730,7 @@ def evaluate_reference_plan(
     transportation_bits: List[float] = []
     required_fill_bits: List[float] = []
     required_valid_bits: List[float] = []
+    nonempty_cost_slots: set[Tuple[int, str]] = set()
     cost_complete = True
     estimated_cost = 0.0
     people = max(1, int(batch_item.get("people_number", 1) or 1))
@@ -693,6 +757,8 @@ def evaluate_reference_plan(
             slot = (day, field)
             value = str(row.get(field, "-") or "-").strip() or "-"
             nonempty = canonical_value(value) != "-"
+            if nonempty and field in COST_FIELDS:
+                nonempty_cost_slots.add(slot)
             if slot in required:
                 required_fill_bits.append(float(nonempty))
 
@@ -724,14 +790,11 @@ def evaluate_reference_plan(
                     city_bits.append(valid)
                     if entry is not None:
                         selected_entries[slot] = [entry]
-                        if entry.cost is None:
+                        party_cost = scaled_party_cost(entry, people)
+                        if party_cost is None:
                             cost_complete = False
-                        elif entry.mode == "flight":
-                            estimated_cost += entry.cost * people
-                        elif entry.mode == "taxi":
-                            estimated_cost += entry.cost * math.ceil(people / 4)
                         else:
-                            estimated_cost += entry.cost * math.ceil(people / 5)
+                            estimated_cost += party_cost
                     else:
                         cost_complete = False
             else:
@@ -775,18 +838,12 @@ def evaluate_reference_plan(
                 if nonempty and not grounded:
                     cost_complete = False
                 for entry in matched:
-                    if field in MEAL_FIELDS:
-                        if entry.cost is None:
+                    if field in (*MEAL_FIELDS, "accommodation"):
+                        party_cost = scaled_party_cost(entry, people)
+                        if party_cost is None:
                             cost_complete = False
                         else:
-                            estimated_cost += entry.cost * people
-                    elif field == "accommodation":
-                        if entry.cost is None:
-                            cost_complete = False
-                        else:
-                            estimated_cost += entry.cost * math.ceil(
-                                people / max(1.0, entry.maximum_occupancy)
-                            )
+                            estimated_cost += party_cost
 
             if slot in required:
                 required_valid_bits.append(slot_validity[slot])
@@ -872,14 +929,48 @@ def evaluate_reference_plan(
         for key, value in commonsense_soft_values.items()
     }
 
+    required_cost_slots = {
+        slot for slot in required if slot[1] in COST_FIELDS
+    }
+    required_cost_known_bits = [
+        float(
+            bool(selected_entries.get(slot))
+            and all(entry.cost is not None for entry in selected_entries[slot])
+        )
+        for slot in required_cost_slots
+    ]
+    required_cost_completeness = _mean(
+        required_cost_known_bits, default=0.0
+    )
+    budget_cost_slots = required_cost_slots | nonempty_cost_slots
+    budget_cost_known_bits = [
+        float(
+            bool(selected_entries.get(slot))
+            and all(entry.cost is not None for entry in selected_entries[slot])
+        )
+        for slot in budget_cost_slots
+    ]
+    budget_cost_completeness = _mean(
+        budget_cost_known_bits, default=0.0
+    )
+
     budget = float(batch_item.get("budget", 0) or 0)
-    if not cost_complete or budget <= 0:
-        budget_fit = 0.0
+    if budget <= 0:
+        budget_margin_score = 0.0
     elif estimated_cost <= budget:
-        budget_fit = 1.0
+        budget_margin_score = 1.0
     else:
-        budget_fit = max(0.0, 1.0 - (estimated_cost - budget) / budget)
-    budget_soft = required_grounded_recall * budget_fit
+        budget_margin_score = max(
+            0.0, 1.0 - (estimated_cost - budget) / budget
+        )
+    # Dense training surface: retain grounding and known-price progress even
+    # when one malformed entity keeps the strict terminal budget check at zero.
+    # A fully grounded, fully costed, within-budget plan still maps to exactly 1.
+    budget_soft = (
+        required_grounded_recall
+        * budget_cost_completeness
+        * budget_margin_score
+    )
     budget_pass = float(
         cost_complete
         and budget > 0
@@ -919,9 +1010,8 @@ def evaluate_reference_plan(
             for entry in entries
             if entry.category == "accommodation"
         ]
-        rule = canonical_value(house_rule)
         rule_bits = [
-            float(f"no {rule}" not in canonical_value(entry.house_rules))
+            float(accommodation_satisfies_house_rule(entry, house_rule))
             for entry in accommodations
         ]
         rule_score = _mean(rule_bits)
@@ -936,29 +1026,27 @@ def evaluate_reference_plan(
             for entry in entries
             if entry.category == "accommodation"
         ]
-        requested = canonical_value(requested_room)
-
-        def room_ok(entry: CatalogEntry) -> bool:
-            actual = canonical_value(entry.room_type)
-            if requested == "not shared room":
-                return actual != "shared room"
-            if requested == "entire room":
-                return actual == "entire home/apt"
-            return actual == requested
-
-        room_bits = [float(room_ok(entry)) for entry in accommodations]
+        room_bits = [
+            float(accommodation_satisfies_room_type(entry, requested_room))
+            for entry in accommodations
+        ]
         room_score = _mean(room_bits)
         hard_soft["room_type"] = room_score
         hard_pass["room_type"] = float(bool(room_bits) and room_score >= 1.0)
 
     transport_rule = constraints.get("transportation")
     if transport_rule:
-        rule = canonical_value(transport_rule)
-        forbidden = {
-            "no flight": "flight",
-            "no self-driving": "self-driving",
-        }.get(rule)
-        transport_score = float(forbidden is not None and forbidden not in modes)
+        recognized_rule = canonical_value(transport_rule) in {
+            "no flight",
+            "no self-driving",
+        }
+        eligible_modes = [
+            transportation_satisfies_rule(entry, transport_rule)
+            for entries in selected_entries.values()
+            for entry in entries
+            if entry.category == "transportation"
+        ]
+        transport_score = float(recognized_rule and all(eligible_modes))
         hard_soft["transportation"] = transport_score
         hard_pass["transportation"] = transport_score
 
@@ -1018,6 +1106,10 @@ def evaluate_reference_plan(
         "grounding_f1": float(grounding_f1),
         "commonsense_soft": float(commonsense_soft),
         "hard_constraint_soft": float(hard_micro_soft),
+        "required_cost_completeness": float(required_cost_completeness),
+        "budget_cost_completeness": float(budget_cost_completeness),
+        "budget_margin_score": float(budget_margin_score),
+        "budget_constraint_soft": float(budget_soft),
         "reference_parse_success": reference_parse_success,
         "estimated_cost": float(estimated_cost),
         "budget": float(budget),
@@ -1076,6 +1168,12 @@ def evaluate_reference_plan(
         "_aggregate/required_slot_count": float(len(required_valid_bits)),
         "_aggregate/grounded_entity_count": float(sum(grounded_entity_bits)),
         "_aggregate/predicted_entity_count": float(len(grounded_entity_bits)),
+        "_aggregate/required_cost_known_count": float(
+            sum(required_cost_known_bits)
+        ),
+        "_aggregate/required_cost_slot_count": float(
+            len(required_cost_known_bits)
+        ),
         "reference_catalog_counts": {
             "restaurants": len(catalog.restaurants),
             "attractions": len(catalog.attractions),

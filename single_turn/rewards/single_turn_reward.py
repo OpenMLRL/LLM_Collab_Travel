@@ -42,7 +42,7 @@ def _geometric_quality(balance: float, quality: float) -> float:
 
 @dataclass
 class TravelRewardConfig:
-    """Weights for the learnable strict-first v7 team reward.
+    """Weights for the learnable strict-first v8 team reward.
 
     Strict joint quality owns 91% of the positive range. Two small, bounded
     protocol/recovered-semantic channels keep malformed early rollouts
@@ -410,7 +410,7 @@ def score_single_turn_response(
             f"reward_penalty/{key}": float(value)
             for key, value in penalty_components.items()
         },
-        "reward_backend": "reference_constraint_learnable_v7",
+        "reward_backend": "reference_constraint_learnable_v8_budget_dense",
     }
     return float(reward), reward_detail
 

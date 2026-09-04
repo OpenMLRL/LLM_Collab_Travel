@@ -20,6 +20,7 @@ from single_turn.evaluation import evaluate_single_turn_response
 from single_turn.formatting import (
     build_agent_json_prefill,
     build_compact_reference_context,
+    build_role_budget_contract,
     get_single_turn_formatters,
 )
 from single_turn.logger import (
@@ -27,7 +28,14 @@ from single_turn.logger import (
     build_single_turn_eval_logger,
 )
 from single_turn.parsing import parse_assignments
-from single_turn.rewards.reference_evaluator import parse_reference_catalog
+from single_turn.rewards.reference_evaluator import (
+    CatalogEntry,
+    accommodation_satisfies_house_rule,
+    accommodation_satisfies_room_type,
+    parse_reference_catalog,
+    scaled_party_cost,
+    transportation_satisfies_rule,
+)
 from single_turn.rewards.single_turn_reward import (
     TravelJointReward,
     TravelRewardConfig,
@@ -351,13 +359,107 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(len(catalog.accommodations), 2)
         self.assertEqual(len(catalog.transportation), 2)
 
+    def test_shared_hard_constraint_and_party_cost_helpers(self):
+        restaurant = CatalogEntry(
+            category="restaurant", name="Cafe", cost=10
+        )
+        flight = CatalogEntry(
+            category="transportation", name="F1", cost=10, mode="flight"
+        )
+        taxi = CatalogEntry(
+            category="transportation", name="Taxi", cost=10, mode="taxi"
+        )
+        drive = CatalogEntry(
+            category="transportation",
+            name="Self-driving",
+            cost=10,
+            mode="self-driving",
+        )
+        private_room = CatalogEntry(
+            category="accommodation",
+            name="Hotel",
+            cost=10,
+            room_type="Private room",
+            house_rules="No parties",
+            maximum_occupancy=3,
+        )
+
+        self.assertEqual(scaled_party_cost(restaurant, 7), 70.0)
+        self.assertEqual(scaled_party_cost(flight, 7), 70.0)
+        self.assertEqual(scaled_party_cost(taxi, 7), 20.0)
+        self.assertEqual(scaled_party_cost(drive, 7), 20.0)
+        self.assertEqual(scaled_party_cost(private_room, 7), 30.0)
+        self.assertTrue(
+            accommodation_satisfies_room_type(private_room, "Private room")
+        )
+        self.assertTrue(
+            accommodation_satisfies_room_type(private_room, "not shared room")
+        )
+        self.assertFalse(
+            accommodation_satisfies_room_type(private_room, "entire room")
+        )
+        self.assertFalse(
+            accommodation_satisfies_house_rule(private_room, "parties")
+        )
+        self.assertTrue(
+            accommodation_satisfies_house_rule(private_room, "smoking")
+        )
+        self.assertFalse(transportation_satisfies_rule(flight, "no flight"))
+        self.assertTrue(transportation_satisfies_rule(taxi, "no flight"))
+        self.assertFalse(
+            transportation_satisfies_rule(drive, "no self-driving")
+        )
+
+    def test_terminal_hard_constraint_checks_remain_strict(self):
+        room_item = fixture_item()
+        room_item["local_constraint"] = {
+            **room_item["local_constraint"],
+            "room type": "Private room",
+        }
+        _, matching_room = score_single_turn_response(
+            valid_completions(accommodation="Hotel, Beta"),
+            batch_item=room_item,
+        )
+        _, wrong_room = score_single_turn_response(
+            valid_completions(accommodation="Motel, Beta"),
+            batch_item=room_item,
+        )
+        self.assertEqual(matching_room["hard_pass/room_type"], 1.0)
+        self.assertEqual(matching_room["ultimate/reference_hard_macro"], 1.0)
+        self.assertEqual(wrong_room["hard_pass/room_type"], 0.0)
+        self.assertEqual(wrong_room["ultimate/reference_hard_macro"], 0.0)
+
+        house_item = fixture_item()
+        house_item["local_constraint"] = {
+            **house_item["local_constraint"],
+            "house rule": "parties",
+        }
+        _, forbidden_house_rule = score_single_turn_response(
+            valid_completions(accommodation="Hotel, Beta"),
+            batch_item=house_item,
+        )
+        self.assertEqual(forbidden_house_rule["hard_pass/room_rule"], 0.0)
+
+        transport_item = fixture_item()
+        transport_item["local_constraint"] = {
+            **transport_item["local_constraint"],
+            "transportation": "no flight",
+        }
+        _, forbidden_transport = score_single_turn_response(
+            valid_completions(), batch_item=transport_item
+        )
+        self.assertEqual(
+            forbidden_transport["hard_pass/transportation"], 0.0
+        )
+
     def test_valid_plan_reaches_maximum_without_gold(self):
         reward, detail = score_single_turn_response(
             valid_completions(), batch_item=fixture_item()
         )
         self.assertAlmostEqual(reward, 1.0, places=6)
         self.assertEqual(
-            detail["reward_backend"], "reference_constraint_learnable_v7"
+            detail["reward_backend"],
+            "reference_constraint_learnable_v8_budget_dense",
         )
         self.assertEqual(detail["ultimate/reference_plan_success"], 1.0)
         self.assertEqual(detail["ultimate/reference_plan_delivery"], 1.0)
@@ -369,6 +471,94 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(detail["required_cooperative_contribution"], 1.0)
         self.assertNotIn("exact_match", detail)
         self.assertNotIn("slot_quality", detail)
+
+    def test_budget_shaping_is_dense_without_weakening_terminal_pass(self):
+        exact_budget = fixture_item()
+        exact_budget["budget"] = 290
+        reward, valid = score_single_turn_response(
+            valid_completions(), batch_item=exact_budget
+        )
+        self.assertAlmostEqual(reward, 1.0, places=6)
+        self.assertEqual(valid["required_cost_completeness"], 1.0)
+        self.assertEqual(valid["budget_margin_score"], 1.0)
+        self.assertEqual(valid["budget_constraint_soft"], 1.0)
+        self.assertEqual(valid["ultimate/reference_budget_pass"], 1.0)
+
+        values = valid_plan_values()
+        values[(2, "lunch")] = "Imaginary Cafe, Beta"
+        _, unknown_meal = score_single_turn_response(
+            completions_from_values(values), batch_item=exact_budget
+        )
+        self.assertAlmostEqual(
+            unknown_meal["required_cost_completeness"], 6.0 / 7.0
+        )
+        self.assertAlmostEqual(
+            unknown_meal["required_grounded_recall"], 10.0 / 11.0
+        )
+        self.assertAlmostEqual(
+            unknown_meal["budget_constraint_soft"], 60.0 / 77.0
+        )
+        self.assertGreater(unknown_meal["budget_constraint_soft"], 0.0)
+        self.assertEqual(unknown_meal["cost_complete"], 0.0)
+        self.assertEqual(unknown_meal["ultimate/reference_budget_pass"], 0.0)
+
+        values = valid_plan_values()
+        values[(2, "attraction")] = "Imaginary Museum, Beta"
+        _, unknown_attraction = score_single_turn_response(
+            completions_from_values(values), batch_item=exact_budget
+        )
+        self.assertEqual(unknown_attraction["required_cost_completeness"], 1.0)
+        self.assertAlmostEqual(
+            unknown_attraction["budget_constraint_soft"], 10.0 / 11.0
+        )
+        self.assertEqual(unknown_attraction["cost_complete"], 0.0)
+        self.assertEqual(
+            unknown_attraction["ultimate/reference_budget_pass"], 0.0
+        )
+
+        # Optional travel-day cost slots are not part of the required-plan
+        # denominator. If the model nevertheless emits one, it must be costed
+        # before dense budget shaping can reach one.
+        values = valid_plan_values()
+        values[(1, "breakfast")] = "Imaginary Cafe, Beta"
+        _, unknown_optional_cost = score_single_turn_response(
+            completions_from_values(values), batch_item=exact_budget
+        )
+        self.assertEqual(
+            unknown_optional_cost["required_cost_completeness"], 1.0
+        )
+        self.assertAlmostEqual(
+            unknown_optional_cost["budget_cost_completeness"], 7.0 / 8.0
+        )
+        self.assertAlmostEqual(
+            unknown_optional_cost["budget_constraint_soft"], 7.0 / 8.0
+        )
+        self.assertEqual(unknown_optional_cost["cost_complete"], 0.0)
+        self.assertEqual(
+            unknown_optional_cost["ultimate/reference_budget_pass"], 0.0
+        )
+
+    def test_budget_margin_penalizes_overage_continuously(self):
+        expected = ((290, 1.0, 1.0), (250, 0.84, 0.0), (145, 0.0, 0.0))
+        for budget, margin, terminal_pass in expected:
+            with self.subTest(budget=budget):
+                item = fixture_item()
+                item["budget"] = budget
+                _, detail = score_single_turn_response(
+                    valid_completions(), batch_item=item
+                )
+                self.assertAlmostEqual(detail["estimated_cost"], 290.0)
+                self.assertAlmostEqual(detail["budget_margin_score"], margin)
+                self.assertAlmostEqual(detail["budget_constraint_soft"], margin)
+                self.assertEqual(
+                    detail["ultimate/reference_budget_pass"], terminal_pass
+                )
+
+        _, dash = score_single_turn_response(
+            all_dash_completions(), batch_item=fixture_item()
+        )
+        self.assertEqual(dash["required_cost_completeness"], 0.0)
+        self.assertEqual(dash["budget_constraint_soft"], 0.0)
 
     def test_two_different_valid_plans_can_both_score_maximum(self):
         first, first_detail = score_single_turn_response(
@@ -958,11 +1148,14 @@ class LoggerTests(unittest.TestCase):
                 "turn_1/required_cooperative_contribution",
                 "turn_1/required_grounded_recall",
                 "turn_1/entity_grounding_precision",
+                "turn_1/required_cost_completeness",
+                "turn_1/budget_constraint_soft",
                 "turn_1/route_scaffold_match_rate",
                 "turn_1/ultimate/reference_plan_delivery",
                 "turn_1/ultimate/required_plan_completion",
                 "turn_1/ultimate/reference_commonsense_micro",
                 "turn_1/ultimate/reference_hard_micro",
+                "turn_1/ultimate/reference_budget_pass",
                 "turn_1/ultimate/reference_plan_success",
                 "turn_1/ultimate/collaboration_success",
             },
@@ -990,12 +1183,15 @@ class LoggerTests(unittest.TestCase):
                 "turn_1/required_cooperative_contribution",
                 "turn_1/required_grounded_recall",
                 "turn_1/entity_grounding_precision",
+                "turn_1/required_cost_completeness",
+                "turn_1/budget_constraint_soft",
                 "turn_1/grounding_f1",
                 "turn_1/route_scaffold_match_rate",
                 "turn_1/ultimate/reference_plan_delivery",
                 "turn_1/ultimate/required_plan_completion",
                 "turn_1/ultimate/reference_commonsense_micro",
                 "turn_1/ultimate/reference_hard_micro",
+                "turn_1/ultimate/reference_budget_pass",
                 "turn_1/ultimate/reference_plan_success",
                 "turn_1/ultimate/collaboration_success",
                 "turn_1/eval_samples",
@@ -1010,6 +1206,9 @@ class LoggerTests(unittest.TestCase):
         self.assertIn("required_cooperative_contribution", table.columns)
         self.assertIn("plan_delivery", table.columns)
         self.assertIn("required_plan_completion", table.columns)
+        self.assertIn("required_cost_completeness", table.columns)
+        self.assertIn("budget_constraint_soft", table.columns)
+        self.assertIn("budget_pass", table.columns)
         self.assertEqual(len(table.data), 1)
         self.assertEqual(table.data[0][table.columns.index("reward")], 1.0)
         self.assertEqual(
@@ -1066,6 +1265,8 @@ class LoggerTests(unittest.TestCase):
                 "turn_1/_aggregate/required_slot_count": 1.0,
                 "turn_1/_aggregate/grounded_entity_count": 1.0,
                 "turn_1/_aggregate/predicted_entity_count": 1.0,
+                "turn_1/_aggregate/required_cost_known_count": 6.0,
+                "turn_1/_aggregate/required_cost_slot_count": 7.0,
             },
             {
                 "turn_1/ultimate/reference_hard_micro": 0.25,
@@ -1076,12 +1277,17 @@ class LoggerTests(unittest.TestCase):
                 "turn_1/_aggregate/required_slot_count": 3.0,
                 "turn_1/_aggregate/grounded_entity_count": 3.0,
                 "turn_1/_aggregate/predicted_entity_count": 4.0,
+                "turn_1/_aggregate/required_cost_known_count": 13.0,
+                "turn_1/_aggregate/required_cost_slot_count": 13.0,
             },
         ]
         aggregate = aggregate_single_turn_metrics(metrics)
         self.assertAlmostEqual(aggregate["turn_1/ultimate/reference_hard_micro"], 0.4)
         self.assertAlmostEqual(aggregate["turn_1/required_grounded_recall"], 0.5)
         self.assertAlmostEqual(aggregate["turn_1/entity_grounding_precision"], 0.8)
+        self.assertAlmostEqual(
+            aggregate["turn_1/required_cost_completeness"], 19.0 / 20.0
+        )
         self.assertAlmostEqual(aggregate["turn_1/grounding_f1"], 8.0 / 13.0)
         self.assertNotIn("turn_1/_aggregate/hard_pass_count", aggregate)
 
@@ -1173,6 +1379,103 @@ class DataAndPromptTests(unittest.TestCase):
             {row["id"] for row in train} & {row["id"] for row in evaluation}
         )
 
+    def test_role_budget_contract_is_feasible_exact_and_target_free(self):
+        item = fixture_item()
+        contract = build_role_budget_contract(item)
+        self.assertTrue(contract.feasible)
+        self.assertEqual(contract.reason, "feasible")
+        self.assertEqual(contract.logistics_floor_cents, 20_500)
+        self.assertEqual(contract.experience_floor_cents, 3_700)
+        self.assertEqual(contract.logistics_cap_cents, 58_400)
+        self.assertEqual(contract.experience_cap_cents, 41_600)
+        self.assertEqual(
+            contract.logistics_cap_cents + contract.experience_cap_cents,
+            contract.team_budget_cents,
+        )
+
+        prompts = [
+            formatter(item) for formatter in get_single_turn_formatters(num_agents=2)
+        ]
+        for prompt in prompts:
+            self.assertIn("team_budget=1000.00", prompt)
+            self.assertIn("logistics_cap=584.00", prompt)
+            self.assertIn("experience_cap=416.00", prompt)
+            self.assertIn("feasible=yes", prompt)
+        self.assertIn("YOUR_ROLE=LOGISTICS; YOUR_CAP=584.00", prompts[0])
+        self.assertIn("YOUR_ROLE=EXPERIENCE; YOUR_CAP=416.00", prompts[1])
+
+        poisoned = dict(
+            item,
+            annotated_plan="forbidden target",
+            gold_plan=[{"forbidden": True}],
+        )
+        poisoned_prompts = [
+            formatter(poisoned)
+            for formatter in get_single_turn_formatters(num_agents=2)
+        ]
+        self.assertEqual(prompts, poisoned_prompts)
+
+    def test_role_prompts_make_hard_eligibility_and_required_slots_explicit(self):
+        item = fixture_item()
+        item["local_constraint"] = {
+            "house rule": None,
+            "cuisine": ["Indian"],
+            "room type": "Private room",
+            "transportation": None,
+        }
+        logistics, experience = [
+            formatter(item) for formatter in get_single_turn_formatters(num_agents=2)
+        ]
+        hotel_line = next(
+            line for line in logistics.splitlines() if line.startswith('- "Hotel, Beta"')
+        )
+        motel_line = next(
+            line for line in logistics.splitlines() if line.startswith('- "Motel, Beta"')
+        )
+        cafe_line = next(
+            line for line in experience.splitlines() if line.startswith('- "Cafe, Beta"')
+        )
+        diner_line = next(
+            line for line in experience.splitlines() if line.startswith('- "Diner, Beta"')
+        )
+        self.assertIn("room=Private room", hotel_line)
+        self.assertIn("eligible=yes", hotel_line)
+        self.assertIn("room=Entire home/apt", motel_line)
+        self.assertIn("eligible=no", motel_line)
+        self.assertIn("cuisines=Indian", cafe_line)
+        self.assertIn("eligible=yes", cafe_line)
+        self.assertIn("cuisines=American", diner_line)
+        self.assertIn("eligible=yes", diner_line)
+        self.assertIn(
+            'day=1: breakfast, attraction, lunch, dinner are EMPTY; use "-" for all four',
+            experience,
+        )
+        self.assertIn(
+            "day=2: breakfast, lunch, and dinner are REQUIRED distinct",
+            experience,
+        )
+        self.assertIn("never output multiple attractions in one slot", experience)
+
+    def test_accommodation_prompt_excludes_infeasible_minimum_stay(self):
+        item = fixture_item()
+        item["reference_information"] = item["reference_information"].replace(
+            "Motel 80 Entire home/apt No smoking 1 4 3.0 Beta",
+            "Motel 80 Entire home/apt No smoking 3 4 3.0 Beta",
+        )
+        item["reference_records"] = []
+        logistics = get_single_turn_formatters(num_agents=2)[0](item)
+        hotel_line = next(
+            line for line in logistics.splitlines() if line.startswith('- "Hotel, Beta"')
+        )
+        motel_line = next(
+            line for line in logistics.splitlines() if line.startswith('- "Motel, Beta"')
+        )
+        self.assertIn("days=1,2", hotel_line)
+        self.assertIn("eligible=yes", hotel_line)
+        self.assertIn("min_nights=3", motel_line)
+        self.assertIn("days=none", motel_line)
+        self.assertIn("eligible=no", motel_line)
+
     def test_role_prompts_explain_reference_free_contract(self):
         item = fixture_item()
         prompts = [
@@ -1194,13 +1497,18 @@ class DataAndPromptTests(unittest.TestCase):
         ]
 
         self.assertIn(
-            '"Flight Number: F100, from Alpha to Beta" | cost=20', logistics
+            '"Flight Number: F100, from Alpha to Beta" | team_cost=20.00',
+            logistics,
         )
-        self.assertIn('"Hotel, Beta" | cost_per_night=100', logistics)
-        self.assertNotIn('"Cafe, Beta" | average_cost=10', logistics)
+        self.assertIn(
+            '"Hotel, Beta" | team_cost_per_night=100.00', logistics
+        )
+        self.assertNotIn('"Cafe, Beta" | team_cost_per_meal=10.00', logistics)
         self.assertNotIn("Museum, Beta", logistics)
 
-        self.assertIn('"Cafe, Beta" | average_cost=10', experience)
+        self.assertIn(
+            '"Cafe, Beta" | team_cost_per_meal=10.00', experience
+        )
         self.assertIn('"Museum, Beta"', experience)
         self.assertNotIn("Hotel, Beta", experience)
         self.assertNotIn("Flight Number: F100", experience)

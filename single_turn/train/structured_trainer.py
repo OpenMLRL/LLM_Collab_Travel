@@ -192,6 +192,11 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "train/required_grounded_recall": "required_grounded_recall",
             "train/entity_grounding_precision": "entity_grounding_precision",
             "train/grounding_f1": "grounding_f1",
+            "train/required_cost_completeness": (
+                "required_cost_completeness"
+            ),
+            "train/reference_budget_soft": "budget_constraint_soft",
+            "train/reference_budget_pass": "ultimate/reference_budget_pass",
             "train/reference_commonsense_soft": "commonsense_soft",
             "train/reference_hard_soft": "hard_constraint_soft",
             "train/required_plan_completion": (
@@ -473,6 +478,13 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "required_grounded_recall": "turn_1/required_grounded_recall",
             "entity_grounding_precision": "turn_1/entity_grounding_precision",
             "grounding_f1": "turn_1/grounding_f1",
+            "required_cost_completeness": (
+                "turn_1/required_cost_completeness"
+            ),
+            "reference_budget_soft": "turn_1/budget_constraint_soft",
+            "reference_budget_pass": (
+                "turn_1/ultimate/reference_budget_pass"
+            ),
             "route_scaffold_match": "turn_1/route_scaffold_match_rate",
             "reference_plan_delivery": (
                 "turn_1/ultimate/reference_plan_delivery"

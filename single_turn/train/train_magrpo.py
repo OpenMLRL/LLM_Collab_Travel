@@ -22,7 +22,10 @@ for path in (COMLRL_ROOT, REPO_ROOT):
 from single_turn.aggregation import owned_slots
 from single_turn.config import Config, add_config_args, parse_overrides
 from single_turn.data import load_single_turn_datasets
-from single_turn.formatting import get_single_turn_formatters
+from single_turn.formatting import (
+    build_role_budget_contract,
+    get_single_turn_formatters,
+)
 from single_turn.logger import (
     aggregate_single_turn_metrics,
     build_single_turn_eval_logger,
@@ -222,6 +225,18 @@ def _dry_run(
         parse_reference_catalog(str(row.get("reference_information", ""))).parse_success
         for row in all_rows
     ]
+    budget_contracts = [build_role_budget_contract(row) for row in all_rows]
+    infeasible_contracts = [
+        str(row.get("id", row.get("source_index", "unknown")))
+        for row, contract in zip(all_rows, budget_contracts)
+        if not contract.feasible
+    ]
+    if infeasible_contracts:
+        preview = ", ".join(infeasible_contracts[:5])
+        raise ValueError(
+            "Reference-derived role budget contract is infeasible for "
+            f"{len(infeasible_contracts)} Travel rows: {preview}"
+        )
     report = {
         "status": "ok",
         "train_rows": len(train_rows),
@@ -272,6 +287,15 @@ def _dry_run(
         "sample_reference_catalog_counts": details["reference_catalog_counts"],
         "reference_catalog_success_rows": sum(catalog_successes),
         "reference_catalog_total_rows": len(catalog_successes),
+        "budget_contract_feasible_rows": sum(
+            contract.feasible for contract in budget_contracts
+        ),
+        "budget_contract_total_rows": len(budget_contracts),
+        "budget_contract_cap_sum_rows": sum(
+            contract.logistics_cap_cents + contract.experience_cap_cents
+            == contract.team_budget_cents
+            for contract in budget_contracts
+        ),
         "reference_char_range": [
             min(int(row["reference_chars"]) for row in all_rows),
             max(int(row["reference_chars"]) for row in all_rows),

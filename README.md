@@ -108,6 +108,14 @@ The fixed skeleton is intentionally available only for `partitioned_roles`;
 reference KL is disabled because schema tokens are excluded from this
 domain-specific policy loss.
 
+Each prompt also receives a target-free role budget contract. The contract
+computes the cheapest constraint-compatible logistics and experience floors
+from the supplied catalog, then splits the remaining slack between the two
+roles. The two caps sum exactly to the user budget, so simultaneous agents can
+coordinate joint cost without seeing one another's action. Catalog entries show
+full-party costs and hard-constraint eligibility, and a per-role day checklist
+marks every owned slot as required, exact, or intentionally empty.
+
 The plan conventions are stated in both prompts:
 
 - a travel day uses `current_city="from A to B"` and requires matching
@@ -119,7 +127,7 @@ The plan conventions are stated in both prompts:
   cities;
 - selected entities must come from the supplied reference information.
 
-## Learnable strict-first reference/constraint reward v7
+## Learnable strict-first reference/constraint reward v8
 
 Each row's reference information is parsed once into catalogs for restaurants,
 attractions, accommodations, flights, taxis, and self-driving routes. The
@@ -135,6 +143,24 @@ For each strict merged plan the scorer calculates:
 - required information, restaurant/attraction diversity, transportation
   consistency, and minimum-night compliance;
 - estimated total cost and all applicable user constraints.
+
+The terminal budget pass remains strict: every required slot must be grounded,
+every emitted entity must be costable, and the complete plan must be within
+budget. Its training-only soft surface is dense:
+
+```text
+budget soft = required grounded recall
+            × emitted cost completeness
+            × over-budget margin
+```
+
+Emitted cost completeness covers every required transportation,
+accommodation, and meal slot plus any optional cost-bearing slot the policy
+chooses to fill. The separately logged required-cost completeness metric keeps
+a stable required-slot denominator. The margin is `1` within budget and falls
+linearly to `0` as known cost moves from one to two times the budget. This
+preserves the final metric while avoiding a zero reward cliff when one entity
+is still malformed.
 
 To prevent vacuously satisfied checks from rewarding an all-dash itinerary,
 let `S = 0.10 + 0.90 × required grounded recall`. The unit strict plan-quality
@@ -207,8 +233,8 @@ longer mistaken for a complete object and cropped early.
 
 The default keeps `advantage_mode=mean` but disables per-prompt unit-variance
 normalization. Earlier runs either amplified near-zero numerical noise or
-optimized recovery while strict collaboration fell to zero. V7 keeps 91% of
-all positive reward behind strict joint quality/final success, while its 5%
+optimized recovery while strict collaboration fell to zero. V8 keeps the v7
+positive weights and strict endpoint, while its 5%
 bounded pre-validity surface makes distinct early outputs rankable.
 
 The rollout and train buffers are 10 prompts. This changes neither model memory
@@ -240,6 +266,9 @@ W&B publishes only this compact surface:
 | `eval/required_grounded_recall` | Grounded required slots divided by all required slots | ↑ |
 | `eval/entity_grounding_precision` | Supported emitted entities divided by emitted entities | ↑ |
 | `eval/grounding_f1` | Harmonic mean of grounding precision and required recall | ↑ |
+| `eval/required_cost_completeness` | Required priced slots with a known catalog cost | ↑ |
+| `eval/reference_budget_soft` | Dense grounding × cost-completeness × budget-margin progress | ↑ |
+| `eval/reference_budget_pass` | Strict complete, grounded plan within the total budget | ↑ |
 | `eval/route_scaffold_match` | Generated move/stay legs matching the reference-derived scaffold | ↑ |
 | `eval/reference_plan_delivery` | A non-empty plan is delivered (paper-style delivery, independent of correctness) | ↑ |
 | `eval/required_plan_completion` | Both strict role actions fill every scaffold-required slot | ↑ |
@@ -262,6 +291,9 @@ collaboration_success
 required_cooperative_contribution
 required_grounded_recall
 entity_grounding_precision
+required_cost_completeness
+reference_budget_soft
+reference_budget_pass
 ```
 
 For paper-style reporting, use `initial / final / delta` columns. The micro and
@@ -280,6 +312,8 @@ has the same denominator as the rest of that curve.
 Training logs expose `train/reward` plus the reward-independent
 `train/team_action_success`, `train/required_cooperative_contribution`,
 `train/required_grounded_recall`, `train/grounding_f1`,
+`train/required_cost_completeness`, `train/reference_budget_soft`,
+`train/reference_budget_pass`,
 `train/reference_commonsense_soft`, `train/reference_hard_soft`, and
 `train/collaboration_success`. `train/reward_group_std`,
 `train/nonzero_advantage_rate`, and `train/meaningful_advantage_rate` show

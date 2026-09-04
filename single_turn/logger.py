@@ -20,11 +20,14 @@ _EVAL_SCALAR_KEYS = (
     "required_cooperative_contribution",
     "required_grounded_recall",
     "entity_grounding_precision",
+    "required_cost_completeness",
+    "budget_constraint_soft",
     "route_scaffold_match_rate",
     "ultimate/reference_plan_delivery",
     "ultimate/required_plan_completion",
     "ultimate/reference_commonsense_micro",
     "ultimate/reference_hard_micro",
+    "ultimate/reference_budget_pass",
     "ultimate/reference_plan_success",
     "ultimate/collaboration_success",
 )
@@ -40,6 +43,8 @@ _AGGREGATE_SUPPORT_KEYS = (
     "_aggregate/required_slot_count",
     "_aggregate/grounded_entity_count",
     "_aggregate/predicted_entity_count",
+    "_aggregate/required_cost_known_count",
+    "_aggregate/required_cost_slot_count",
 )
 
 
@@ -139,6 +144,11 @@ def build_single_turn_eval_logger(
                 ],
                 "required_grounded_recall": detail["required_grounded_recall"],
                 "grounding_precision": detail["entity_grounding_precision"],
+                "required_cost_completeness": detail[
+                    "required_cost_completeness"
+                ],
+                "budget_constraint_soft": detail["budget_constraint_soft"],
+                "budget_pass": detail["ultimate/reference_budget_pass"],
                 "route_scaffold_match": detail["route_scaffold_match_rate"],
                 "plan_delivery": detail[
                     "ultimate/reference_plan_delivery"
@@ -209,6 +219,10 @@ def aggregate_single_turn_metrics(
             "turn_1/_aggregate/grounded_entity_count",
             "turn_1/_aggregate/predicted_entity_count",
         ),
+        "turn_1/required_cost_completeness": (
+            "turn_1/_aggregate/required_cost_known_count",
+            "turn_1/_aggregate/required_cost_slot_count",
+        ),
     }
     for output_key, (numerator_key, denominator_key) in ratio_specs.items():
         numerator = sum(
@@ -254,6 +268,9 @@ def aggregate_single_turn_metrics(
                 "required_cooperative_contribution",
                 "required_grounded_recall",
                 "grounding_precision",
+                "required_cost_completeness",
+                "budget_constraint_soft",
+                "budget_pass",
                 "route_scaffold_match",
                 "plan_delivery",
                 "required_plan_completion",
