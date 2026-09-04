@@ -7,11 +7,13 @@ than weakening the parser after the fact.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import torch
 from transformers import (
+    LogitsProcessor,
+    LogitsProcessorList,
     StoppingCriteria,
     StoppingCriteriaList,
 )
@@ -21,6 +23,38 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are one agent in a decentralized travel-planning team. Follow the user's "
     "role and output contract exactly. Return only the requested JSON object."
 )
+
+
+class GreedyArgmaxLogitsProcessor(LogitsProcessor):
+    """Leave exactly one next-token candidate for sampling-free eval.
+
+    MAGRPO intentionally samples during rollout generation.  Travel reuses that
+    path for evaluation, so this processor makes the evaluation path equivalent
+    to greedy argmax without changing the shared trainer or the stochastic
+    training path.  ``argmax`` also resolves exact logit ties deterministically
+    by selecting the first token index.
+    """
+
+    def __call__(
+        self, input_ids: torch.LongTensor, scores: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        del input_ids
+        winner = scores.argmax(dim=-1, keepdim=True)
+        forced = torch.full_like(scores, float("-inf"))
+        return forced.scatter(1, winner, scores.gather(1, winner))
+
+
+def with_greedy_argmax_processor(existing: Any) -> LogitsProcessorList:
+    """Append Travel's argmax constraint without mutating caller processors."""
+
+    processor = GreedyArgmaxLogitsProcessor()
+    if existing is None:
+        return LogitsProcessorList([processor])
+    if isinstance(existing, LogitsProcessorList):
+        return LogitsProcessorList([*existing, processor])
+    if isinstance(existing, Sequence) and not isinstance(existing, (str, bytes)):
+        return LogitsProcessorList([*existing, processor])
+    return LogitsProcessorList([existing, processor])
 
 
 def apply_chat_template(
@@ -89,20 +123,22 @@ class _JsonObjectState:
     """Incremental lexical state for the first JSON object in a text stream."""
 
     started: bool = False
-    depth: int = 0
+    delimiters: List[str] = field(default_factory=list)
     in_string: bool = False
     escaped: bool = False
+    invalid: bool = False
     complete: bool = False
+    terminal: bool = False
 
     def feed(self, text: str) -> bool:
-        if self.complete:
+        if self.terminal:
             return True
 
         for char in text:
             if not self.started:
                 if char == "{":
                     self.started = True
-                    self.depth = 1
+                    self.delimiters.append("{")
                 continue
 
             if self.in_string:
@@ -116,12 +152,23 @@ class _JsonObjectState:
 
             if char == '"':
                 self.in_string = True
-            elif char == "{":
-                self.depth += 1
-            elif char == "}":
-                self.depth -= 1
-                if self.depth == 0:
+            elif char in "{[":
+                self.delimiters.append(char)
+            elif char in "}]":
+                expected = "{" if char == "}" else "["
+                if not self.delimiters or self.delimiters[-1] != expected:
+                    # The raw action is already invalid JSON.  Do not crop it
+                    # as a successful object merely because brace depth happens
+                    # to reach zero while an assignments array is still open.
+                    # Stop immediately anyway: extra tokens cannot repair a
+                    # mismatched delimiter and would waste the rollout budget.
+                    self.invalid = True
+                    self.terminal = True
+                    return True
+                self.delimiters.pop()
+                if not self.delimiters and not self.invalid:
                     self.complete = True
+                    self.terminal = True
                     return True
 
         return False
@@ -182,7 +229,7 @@ class CompleteJSONObjectCriteria(StoppingCriteria):
         done = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
         for row_idx in range(batch_size):
             state = self._states[row_idx]
-            if state.complete:
+            if state.terminal:
                 done[row_idx] = True
                 continue
 
@@ -203,7 +250,7 @@ class CompleteJSONObjectCriteria(StoppingCriteria):
                     self._completed_response_lengths[row_idx] = max(
                         0, sequence_length - self.prompt_length
                     )
-            done[row_idx] = state.complete
+            done[row_idx] = state.terminal
         return done
 
 

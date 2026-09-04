@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from numbers import Real
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 import numpy as np
 
@@ -24,9 +25,15 @@ def _scalarize_reward_details(detail: Dict[str, Any]) -> Dict[str, float]:
 
 def build_single_turn_eval_logger(
     eval_rows: Iterable[Dict[str, Any]],
+    *,
+    reward_config: Any = None,
+    panel_size: int = 4,
 ) -> Callable[..., List[Dict[str, Any]]]:
     row_by_prompt: Dict[str, Dict[str, Any]] = {}
-    for row in eval_rows:
+    panel_by_prompt: Dict[str, int] = {}
+    if int(panel_size) < 1:
+        raise ValueError("panel_size must be positive.")
+    for row_idx, row in enumerate(eval_rows):
         key = _prompt_key(row.get("prompt") or row.get("query") or "")
         if key in row_by_prompt:
             raise ValueError(
@@ -34,6 +41,7 @@ def build_single_turn_eval_logger(
                 "metric rows would be ambiguous."
             )
         row_by_prompt[key] = row
+        panel_by_prompt[key] = row_idx // int(panel_size) + 1
 
     def logger(
         agent_completions_turns: List[List[List[str]]],
@@ -63,6 +71,92 @@ def build_single_turn_eval_logger(
             sample_metrics: Dict[str, Any] = {"sample_id": row.get("id", sample_idx)}
             for key, value in _scalarize_reward_details(detail).items():
                 sample_metrics[f"turn_1/{key}"] = value
+            reward_value = None
+            reward_detail: Dict[str, Any] = {}
+            if reward_config is not None:
+                # Import lazily to keep the reward-independent evaluator free
+                # from a reverse dependency on the training reward module.
+                from single_turn.rewards.single_turn_reward import (
+                    score_single_turn_response,
+                )
+
+                reward_value, reward_detail = score_single_turn_response(
+                    completions,
+                    batch_item=row,
+                    config=reward_config,
+                )
+                reward_metric_keys = (
+                    "plan_score",
+                    "strict_composite_quality",
+                    "protocol_progress",
+                    "recovered_semantic_balance",
+                    "recovered_plan_score",
+                    "recovered_composite_quality",
+                )
+                for key in reward_metric_keys:
+                    sample_metrics[f"turn_1/reward_model/{key}"] = float(
+                        reward_detail[key]
+                    )
+            sample_metrics["_eval_sample"] = {
+                "panel_id": panel_by_prompt[_prompt_key(prompt)],
+                "sample_id": str(row.get("id", sample_idx)),
+                "level": str(row.get("level", "")),
+                "days": int(row.get("days", 0)),
+                "query": str(row.get("query") or row.get("prompt") or ""),
+                "agent_0_output": completions[0],
+                "agent_1_output": completions[1],
+                "merged_plan": json.dumps(
+                    detail["merged_plan"], ensure_ascii=False, sort_keys=True
+                ),
+                "reward": reward_value,
+                "plan_score": reward_detail.get("plan_score"),
+                "strict_composite_quality": reward_detail.get(
+                    "strict_composite_quality"
+                ),
+                "protocol_progress": reward_detail.get("protocol_progress"),
+                "recovered_semantic_balance": reward_detail.get(
+                    "recovered_semantic_balance"
+                ),
+                "recovered_plan_score": reward_detail.get(
+                    "recovered_plan_score"
+                ),
+                "recovered_composite_quality": reward_detail.get(
+                    "recovered_composite_quality"
+                ),
+                "action_validity": detail["action_validity"],
+                "team_action_success": detail["ultimate/team_action_success"],
+                "both_agent_verified": detail[
+                    "ultimate/both_agent_verified_contribution"
+                ],
+                "both_agent_required_grounded": detail[
+                    "ultimate/both_agent_required_grounded_contribution"
+                ],
+                "required_cooperative_contribution": detail[
+                    "required_cooperative_contribution"
+                ],
+                "agent_0_required_contribution": detail[
+                    "agent_0/required_grounded_contribution"
+                ],
+                "agent_1_required_contribution": detail[
+                    "agent_1/required_grounded_contribution"
+                ],
+                "required_grounded_recall": detail["required_grounded_recall"],
+                "grounding_precision": detail["entity_grounding_precision"],
+                "route_scaffold_match": detail["route_scaffold_match_rate"],
+                "commonsense_micro": detail[
+                    "ultimate/reference_commonsense_micro"
+                ],
+                "hard_micro": detail["ultimate/reference_hard_micro"],
+                "reference_plan_success": detail[
+                    "ultimate/reference_plan_success"
+                ],
+                "collaboration_success": detail[
+                    "ultimate/collaboration_success"
+                ],
+                "parser_errors": json.dumps(
+                    detail["parser_errors"], ensure_ascii=False
+                ),
+            }
             metrics.append(sample_metrics)
         return metrics
 
@@ -71,7 +165,7 @@ def build_single_turn_eval_logger(
 
 def aggregate_single_turn_metrics(
     metrics_list: List[Dict[str, Any]], num_turns: int = 1
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     del num_turns
     if not metrics_list:
         return {}
@@ -129,4 +223,59 @@ def aggregate_single_turn_metrics(
         if precision > 0.0 and recall > 0.0
         else 0.0
     )
+
+    sample_rows = [
+        sample["_eval_sample"]
+        for sample in metrics_list
+        if isinstance(sample.get("_eval_sample"), Mapping)
+    ]
+    if sample_rows:
+        panel_ids = sorted({int(row["panel_id"]) for row in sample_rows})
+        aggregated["turn_1/eval_sample_count"] = float(len(sample_rows))
+        # Zero means the terminal evaluation spans more than one panel.
+        aggregated["turn_1/eval_panel_id"] = float(
+            panel_ids[0] if len(panel_ids) == 1 else 0
+        )
+        aggregated["turn_1/eval_panel_count"] = float(len(panel_ids))
+        try:
+            import wandb
+        except ImportError:
+            pass
+        else:
+            columns = [
+                "panel_id",
+                "sample_id",
+                "level",
+                "days",
+                "query",
+                "agent_0_output",
+                "agent_1_output",
+                "merged_plan",
+                "reward",
+                "plan_score",
+                "strict_composite_quality",
+                "protocol_progress",
+                "recovered_semantic_balance",
+                "recovered_plan_score",
+                "recovered_composite_quality",
+                "action_validity",
+                "team_action_success",
+                "both_agent_verified",
+                "both_agent_required_grounded",
+                "required_cooperative_contribution",
+                "agent_0_required_contribution",
+                "agent_1_required_contribution",
+                "required_grounded_recall",
+                "grounding_precision",
+                "route_scaffold_match",
+                "commonsense_micro",
+                "hard_micro",
+                "reference_plan_success",
+                "collaboration_success",
+                "parser_errors",
+            ]
+            aggregated["turn_1/eval_samples"] = wandb.Table(
+                columns=columns,
+                data=[[row.get(column) for column in columns] for row in sample_rows],
+            )
     return aggregated

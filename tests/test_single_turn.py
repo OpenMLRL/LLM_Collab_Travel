@@ -30,6 +30,7 @@ from single_turn.parsing import parse_assignments
 from single_turn.rewards.reference_evaluator import parse_reference_catalog
 from single_turn.rewards.single_turn_reward import (
     TravelJointReward,
+    TravelRewardConfig,
     score_single_turn_response,
 )
 
@@ -109,6 +110,91 @@ def fixture_item():
     }
 
 
+def five_day_fixture_item():
+    records = []
+    for city in ("Beta", "Gamma"):
+        records.extend(
+            [
+                {
+                    "Description": f"Attractions in {city}",
+                    "Content": (
+                        "Name Latitude Longitude Address Phone Website City\n"
+                        f"Museum-{city} 1.0 2.0 Main-Street 555 site {city}"
+                    ),
+                },
+                {
+                    "Description": f"Restaurants in {city}",
+                    "Content": (
+                        "Name Average Cost Cuisines Aggregate Rating City\n"
+                        f"Cafe-{city} 10 American 4.0 {city}\n"
+                        f"Diner-{city} 15 Italian 4.1 {city}\n"
+                        f"Bistro-{city} 20 French 4.2 {city}"
+                    ),
+                },
+                {
+                    "Description": f"Accommodations in {city}",
+                    "Content": (
+                        "NAME price room type house_rules minimum nights maximum "
+                        "occupancy review rate number city\n"
+                        f"Hotel-{city} 100 Private room No parties 1 2 4.0 {city}"
+                    ),
+                },
+            ]
+        )
+    for number, origin, destination, date in (
+        (100, "Alpha", "Beta", "2022-01-01"),
+        (200, "Beta", "Gamma", "2022-01-03"),
+        (300, "Gamma", "Alpha", "2022-01-05"),
+    ):
+        records.append(
+            {
+                "Description": (
+                    f"Flight from {origin} to {destination} on {date}"
+                ),
+                "Content": (
+                    "Flight Number Price DepTime ArrTime ActualElapsedTime "
+                    "FlightDate OriginCityName DestCityName Distance\n"
+                    f"F{number} 20 09:00 10:00 1 hours 0 minutes {date} "
+                    f"{origin} {destination} 100"
+                ),
+            }
+        )
+    for origin, destination in (("Gamma", "Beta"), ("Beta", "Alpha")):
+        records.append(
+            {
+                "Description": f"Taxi from {origin} to {destination}",
+                "Content": (
+                    f"taxi, from {origin} to {destination}, duration: "
+                    "2 hours, distance: 100 km, cost: 5"
+                ),
+            }
+        )
+    return {
+        "id": "travelplanner-five-day-fixture",
+        "prompt": "Plan a five-day round trip from Alpha through Beta and Gamma.",
+        "query": "Plan a five-day round trip from Alpha through Beta and Gamma.",
+        "org": "Alpha",
+        "dest": "Beta and Gamma",
+        "days": 5,
+        "visiting_city_number": 2,
+        "date": repr([f"2022-01-0{day}" for day in range(1, 6)]),
+        "dates": [f"2022-01-0{day}" for day in range(1, 6)],
+        "people_number": 1,
+        "budget": 2000,
+        "level": "easy",
+        "reference_information": repr(records),
+        "reference_records": records,
+        "local_constraint": {
+            "house rule": None,
+            "cuisine": None,
+            "room type": None,
+            "transportation": None,
+        },
+        "test": "",
+        "entry_point": "",
+    }
+
+
 def assignment(day, field, value):
     return {"day": day, "field": field, "value": value}
 
@@ -146,11 +232,11 @@ def valid_plan_values(*, attraction="Museum, Beta", accommodation="Hotel, Beta")
     }
 
 
-def completions_from_values(values):
+def completions_from_values(values, *, days=3):
     outputs = []
     for agent_idx in range(2):
         slots = sorted(
-            owned_slots(agent_idx, 3),
+            owned_slots(agent_idx, days),
             key=lambda slot: (slot[0], PLAN_FIELDS.index(slot[1])),
         )
         outputs.append(
@@ -265,12 +351,15 @@ class ReferenceRewardTests(unittest.TestCase):
         reward, detail = score_single_turn_response(
             valid_completions(), batch_item=fixture_item()
         )
-        self.assertAlmostEqual(reward, 1.15, places=6)
-        self.assertEqual(detail["reward_backend"], "reference_constraint_dense_v5")
+        self.assertAlmostEqual(reward, 1.0, places=6)
+        self.assertEqual(
+            detail["reward_backend"], "reference_constraint_learnable_v7"
+        )
         self.assertEqual(detail["ultimate/reference_plan_success"], 1.0)
         self.assertEqual(detail["ultimate/collaboration_success"], 1.0)
         self.assertEqual(detail["ultimate/team_action_success"], 1.0)
         self.assertEqual(detail["required_grounded_recall"], 1.0)
+        self.assertEqual(detail["required_cooperative_contribution"], 1.0)
         self.assertNotIn("exact_match", detail)
         self.assertNotIn("slot_quality", detail)
 
@@ -283,8 +372,8 @@ class ReferenceRewardTests(unittest.TestCase):
             valid_completions(attraction="Park, Beta", accommodation="Motel, Beta"),
             batch_item=fixture_item(),
         )
-        self.assertAlmostEqual(first, 1.15, places=6)
-        self.assertAlmostEqual(second, 1.15, places=6)
+        self.assertAlmostEqual(first, 1.0, places=6)
+        self.assertAlmostEqual(second, 1.0, places=6)
         self.assertEqual(first_detail["ultimate/reference_plan_success"], 1.0)
         self.assertEqual(second_detail["ultimate/reference_plan_success"], 1.0)
 
@@ -342,7 +431,7 @@ class ReferenceRewardTests(unittest.TestCase):
         reward, detail = score_single_turn_response(
             [malformed, outputs[1]], batch_item=fixture_item()
         )
-        self.assertLess(reward, 1.15)
+        self.assertLess(reward, 1.0)
         self.assertEqual(detail["ultimate/team_action_success"], 0.0)
         self.assertEqual(detail["ultimate/collaboration_success"], 0.0)
         self.assertEqual(detail["agent_0/decode_success"], 1.0)
@@ -357,12 +446,15 @@ class ReferenceRewardTests(unittest.TestCase):
         reward, detail = score_single_turn_response(
             [malformed, outputs[1]], batch_item=fixture_item()
         )
-        self.assertGreater(reward, 0.5)
+        self.assertGreater(reward, 0.0)
+        self.assertLess(reward, 0.5)
         self.assertEqual(detail["ultimate/team_action_success"], 0.0)
         self.assertEqual(detail["agent_0/decode_success"], 0.0)
         self.assertGreater(detail["shaping/agent_0/regex_triple_count"], 0.0)
         self.assertGreater(detail["shaping/agent_0/recovered_owned_coverage"], 0.8)
-        self.assertGreater(detail["shaping/plan/required_grounded_recall"], 0.8)
+        self.assertGreater(
+            detail["shaping/recovered_plan/required_grounded_recall"], 0.8
+        )
 
     def test_format_progress_distinguishes_list_from_copied_string(self):
         reference = fixture_item()["reference_information"]
@@ -393,7 +485,7 @@ class ReferenceRewardTests(unittest.TestCase):
         )
         self.assertGreater(overlong_detail["reward_penalty/overlong"], 0.0)
 
-    def test_recovered_grounded_triple_gets_shaping_only(self):
+    def test_recovered_owned_triple_gets_bounded_repair_only(self):
         malformed = (
             '{"agent_id":1,"assignments":['
             '"day":2,"field":"lunch","value":"Diner, Beta"},'
@@ -408,7 +500,11 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(detail["entity_grounding_precision"], 0.0)
         self.assertEqual(detail["ultimate/reference_grounding"], 0.0)
         self.assertEqual(detail["shaping/quoted_grounded_count"], 1.0)
-        self.assertGreater(detail["reward_component/quoted_grounding"], 0.0)
+        self.assertGreater(detail["reward_component/recovered_semantic"], 0.0)
+        self.assertLessEqual(
+            detail["reward_component/recovered_semantic"], 0.03
+        )
+        self.assertEqual(detail["reward_component/strict_quality"], 0.0)
 
         repeated = malformed.replace(
             '"value":"Diner, Beta"',
@@ -427,7 +523,7 @@ class ReferenceRewardTests(unittest.TestCase):
             ["", bare_name], batch_item=fixture_item()
         )
         self.assertEqual(bare_detail["shaping/quoted_grounded_count"], 0.0)
-        self.assertEqual(bare_detail["reward_component/quoted_grounding"], 0.0)
+        self.assertEqual(bare_detail["shaping/quoted_grounding_score"], 0.0)
 
     def test_detached_value_spam_cannot_earn_grounding(self):
         spam = (
@@ -438,8 +534,30 @@ class ReferenceRewardTests(unittest.TestCase):
             [spam, ""], batch_item=fixture_item()
         )
         self.assertEqual(detail["shaping/quoted_grounded_count"], 0.0)
-        self.assertEqual(detail["reward_component/quoted_grounding"], 0.0)
-        self.assertLess(reward, 0.0)
+        self.assertEqual(detail["reward_component/recovered_semantic"], 0.0)
+        self.assertLess(reward, 0.005)
+
+    def test_malformed_grounded_progress_is_rankable_but_strictly_bounded(self):
+        grounded = (
+            '{"agent_id":1,"assignments":['
+            '"day":2,"field":"lunch","value":"Diner, Beta"},'
+        )
+        ungrounded = grounded.replace("Diner, Beta", "Imaginary Cafe, Beta")
+        grounded_reward, grounded_detail = score_single_turn_response(
+            ["", grounded], batch_item=fixture_item()
+        )
+        ungrounded_reward, ungrounded_detail = score_single_turn_response(
+            ["", ungrounded], batch_item=fixture_item()
+        )
+
+        self.assertGreater(grounded_reward, ungrounded_reward)
+        self.assertLessEqual(grounded_reward, 0.05)
+        self.assertEqual(grounded_detail["ultimate/team_action_success"], 0.0)
+        self.assertEqual(ungrounded_detail["ultimate/team_action_success"], 0.0)
+        self.assertGreater(
+            grounded_detail["recovered_semantic_balance"],
+            ungrounded_detail["recovered_semantic_balance"],
+        )
 
     def test_all_dash_and_route_only_do_not_form_a_high_reward_plateau(self):
         dash_reward, _ = score_single_turn_response(
@@ -454,9 +572,9 @@ class ReferenceRewardTests(unittest.TestCase):
         valid_reward, _ = score_single_turn_response(
             valid_completions(), batch_item=fixture_item()
         )
-        self.assertLess(dash_reward, 0.20)
+        self.assertAlmostEqual(dash_reward, 0.08)
         self.assertLess(route_reward, 0.75)
-        self.assertGreater(valid_reward - route_reward, 0.35)
+        self.assertGreater(valid_reward - route_reward, 0.30)
         self.assertEqual(route_detail["ultimate/collaboration_success"], 0.0)
 
     def test_one_extra_assignment_does_not_erase_reward_contribution(self):
@@ -466,10 +584,13 @@ class ReferenceRewardTests(unittest.TestCase):
         reward, detail = score_single_turn_response(
             [outputs[0], json.dumps(over)], batch_item=fixture_item()
         )
-        self.assertGreater(reward, 0.5)
+        self.assertGreater(reward, 0.0)
+        self.assertLess(reward, 0.5)
         self.assertEqual(detail["agent_1/verified_contribution"], 0.0)
-        self.assertGreater(detail["shaping/contribution_mean"], 0.9)
         self.assertGreater(detail["shaping/agent_1/recovered_owned_coverage"], 0.9)
+        self.assertGreater(
+            detail["shaping/agent_1/recovered_required_contribution"], 0.9
+        )
         self.assertGreater(detail["reward_penalty/invalid_action"], 0.0)
 
     def test_dense_reward_order_and_component_accounting(self):
@@ -497,7 +618,176 @@ class ReferenceRewardTests(unittest.TestCase):
             if key.startswith("reward_penalty/")
         )
         self.assertAlmostEqual(partial_detail["unclamped_reward"], positive - penalties)
-        self.assertAlmostEqual(valid_detail["reward"], 1.15)
+        self.assertAlmostEqual(valid_detail["reward"], 1.0)
+
+    def test_malformed_agent_cannot_create_a_high_reward_shortcut(self):
+        outputs = valid_completions()
+        one_malformed = ["prefix\n" + outputs[0], outputs[1]]
+        both_malformed = ["prefix\n" + output for output in outputs]
+        one_reward, one_detail = score_single_turn_response(
+            one_malformed, batch_item=fixture_item()
+        )
+        both_reward, both_detail = score_single_turn_response(
+            both_malformed, batch_item=fixture_item()
+        )
+        self.assertLessEqual(one_reward, 0.07)
+        self.assertLessEqual(both_reward, 0.05)
+        self.assertEqual(one_detail["ultimate/team_action_success"], 0.0)
+        self.assertEqual(both_detail["action_validity"], 0.0)
+        self.assertLessEqual(
+            one_detail["reward_component/recovered_semantic"], 0.03
+        )
+        self.assertLessEqual(
+            both_detail["reward_component/recovered_semantic"], 0.03
+        )
+
+    def test_strict_all_dash_agent_cannot_free_ride_on_either_role(self):
+        outputs = valid_completions()
+        for lazy_agent in (0, 1):
+            payloads = [json.loads(output) for output in outputs]
+            for assignment_row in payloads[lazy_agent]["assignments"]:
+                assignment_row["value"] = "-"
+            lazy_outputs = [
+                json.dumps(payload, ensure_ascii=False) for payload in payloads
+            ]
+            reward, detail = score_single_turn_response(
+                lazy_outputs, batch_item=fixture_item()
+            )
+            self.assertEqual(detail["ultimate/team_action_success"], 1.0)
+            self.assertEqual(
+                detail[f"agent_{lazy_agent}/required_grounded_contribution"],
+                0.0,
+            )
+            self.assertLessEqual(
+                detail["required_cooperative_contribution"], 0.10
+            )
+            self.assertLess(reward, 0.30)
+
+    def test_self_loop_cannot_erase_experience_role_requirements(self):
+        values = valid_plan_values()
+        values[(2, "current_city")] = "from Beta to Beta"
+        values[(2, "transportation")] = "-"
+        outputs = completions_from_values(values)
+        lazy_experience = json.loads(outputs[1])
+        for row in lazy_experience["assignments"]:
+            row["value"] = "-"
+        outputs[1] = json.dumps(lazy_experience)
+
+        reward, detail = score_single_turn_response(
+            outputs, batch_item=fixture_item()
+        )
+
+        self.assertLess(detail["route_parse_rate"], 1.0)
+        self.assertEqual(
+            detail["agent_1/required_grounded_contribution"], 0.0
+        )
+        self.assertLess(reward, 0.25)
+
+    def test_empty_required_role_is_zero_contribution_not_vacuous_success(self):
+        values = {
+            (day, field): "-"
+            for day in range(1, 4)
+            for field in PLAN_FIELDS
+        }
+        values.update(
+            {
+                (1, "current_city"): "from Alpha to Beta",
+                (1, "transportation"): (
+                    "Flight Number: F100, from Alpha to Beta"
+                ),
+                (1, "accommodation"): "Hotel, Beta",
+                (2, "current_city"): "from Beta to Alpha",
+                (2, "transportation"): (
+                    "Flight Number: F200, from Beta to Alpha"
+                ),
+                (3, "current_city"): "from Alpha to Beta",
+                (3, "transportation"): (
+                    "Flight Number: F100, from Alpha to Beta"
+                ),
+            }
+        )
+
+        reward, detail = score_single_turn_response(
+            completions_from_values(values), batch_item=fixture_item()
+        )
+
+        self.assertEqual(
+            detail["agent_1/required_grounded_contribution"], 0.0
+        )
+        self.assertLess(reward, 0.25)
+
+    def test_logistics_agent_cannot_shrink_teammate_work_with_extra_moves(self):
+        values = {
+            (day, field): "-"
+            for day in range(1, 6)
+            for field in PLAN_FIELDS
+        }
+        values.update(
+            {
+                (1, "current_city"): "from Alpha to Beta",
+                (1, "transportation"): (
+                    "Flight Number: F100, from Alpha to Beta"
+                ),
+                (1, "accommodation"): "Hotel-Beta, Beta",
+                (2, "current_city"): "Beta",
+                (2, "breakfast"): "Cafe-Beta, Beta",
+                (2, "attraction"): "Museum-Beta, Beta",
+                (2, "lunch"): "Diner-Beta, Beta",
+                (2, "dinner"): "Bistro-Beta, Beta",
+                (2, "accommodation"): "Hotel-Beta, Beta",
+                (3, "current_city"): "from Beta to Gamma",
+                (3, "transportation"): (
+                    "Flight Number: F200, from Beta to Gamma"
+                ),
+                (3, "accommodation"): "Hotel-Gamma, Gamma",
+                (4, "current_city"): "Gamma",
+                # Agent 1 uses grounded but wrong-city entities on the second
+                # stay day. Agent 0 must not be able to make them valid (or
+                # delete their requirements) by relabeling the day as a move
+                # to Beta.
+                (4, "breakfast"): "Cafe-Beta, Beta",
+                (4, "attraction"): "Museum-Beta, Beta",
+                (4, "lunch"): "Diner-Beta, Beta",
+                (4, "dinner"): "Bistro-Gamma, Gamma",
+                (4, "accommodation"): "Hotel-Gamma, Gamma",
+                (5, "current_city"): "from Gamma to Alpha",
+                (5, "transportation"): (
+                    "Flight Number: F300, from Gamma to Alpha"
+                ),
+            }
+        )
+        honest_outputs = completions_from_values(values, days=5)
+        honest_reward, honest = score_single_turn_response(
+            honest_outputs, batch_item=five_day_fixture_item()
+        )
+
+        attacked = dict(values)
+        attacked.update(
+            {
+                (4, "current_city"): "from Gamma to Beta",
+                (4, "transportation"): "Taxi, from Gamma to Beta",
+                (4, "accommodation"): "Hotel-Beta, Beta",
+                (5, "current_city"): "from Beta to Alpha",
+                (5, "transportation"): "Taxi, from Beta to Alpha",
+            }
+        )
+        attacked_outputs = completions_from_values(attacked, days=5)
+        attacked_reward, attack = score_single_turn_response(
+            attacked_outputs, batch_item=five_day_fixture_item()
+        )
+
+        self.assertEqual(attacked_outputs[1], honest_outputs[1])
+        self.assertEqual(honest["route_scaffold_match_rate"], 1.0)
+        self.assertLess(attack["route_scaffold_match_rate"], 1.0)
+        self.assertLessEqual(
+            attack["required_grounded_recall"],
+            honest["required_grounded_recall"],
+        )
+        self.assertLessEqual(
+            attack["required_cooperative_contribution"],
+            honest["required_cooperative_contribution"],
+        )
+        self.assertLess(attacked_reward, honest_reward)
 
     def test_conflicted_slot_is_not_a_verified_contribution(self):
         outputs = valid_completions()
@@ -529,7 +819,7 @@ class ReferenceRewardTests(unittest.TestCase):
         reward, detail = score_single_turn_response(
             completions_from_values(values), batch_item=fixture_item()
         )
-        self.assertLess(reward, 1.15)
+        self.assertLess(reward, 1.0)
         self.assertEqual(detail["ultimate/reference_transport_consistency"], 0.0)
         self.assertEqual(detail["ultimate/reference_plan_success"], 0.0)
 
@@ -542,7 +832,7 @@ class ReferenceRewardTests(unittest.TestCase):
         reward, detail = score_single_turn_response(
             completions_from_values(values), batch_item=fixture_item()
         )
-        self.assertLess(reward, 1.15)
+        self.assertLess(reward, 1.0)
         self.assertLess(detail["entity_grounding_precision"], 1.0)
         self.assertEqual(detail["ultimate/reference_plan_success"], 0.0)
 
@@ -566,7 +856,7 @@ class ReferenceRewardTests(unittest.TestCase):
         reward, detail = score_single_turn_response(
             completions_from_values(values), batch_item=item
         )
-        self.assertLess(reward, 1.15)
+        self.assertLess(reward, 1.0)
         self.assertEqual(detail["ultimate/reference_within_current_city"], 0.0)
         self.assertEqual(detail["ultimate/reference_plan_success"], 0.0)
 
@@ -579,8 +869,12 @@ class ReferenceRewardTests(unittest.TestCase):
             batch_items=[fixture_item()],
             prompts=[["agent 0"], ["agent 1"]],
         )
-        self.assertEqual(rewards, [1.15])
-        self.assertEqual(reward_model.last_details[0]["reward"], 1.15)
+        self.assertEqual(rewards, [1.0])
+        self.assertEqual(reward_model.last_details[0]["reward"], 1.0)
+        pending = reward_model.drain_details()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["reward"], 1.0)
+        self.assertEqual(reward_model.drain_details(), [])
 
 
 class LoggerTests(unittest.TestCase):
@@ -596,6 +890,31 @@ class LoggerTests(unittest.TestCase):
         )
         self.assertEqual(metrics[0]["turn_1/ultimate/collaboration_success"], 1.0)
         self.assertEqual(metrics[0]["turn_1/ultimate/reference_commonsense_macro"], 1.0)
+
+    def test_eval_logger_builds_a_wandb_sample_table(self):
+        item = fixture_item()
+        outputs = valid_completions()
+        logger = build_single_turn_eval_logger(
+            [item], reward_config=TravelRewardConfig(), panel_size=4
+        )
+        metrics = logger(
+            [[[outputs[0]]], [[outputs[1]]]],
+            test_cases=[""],
+            entry_points=[""],
+            prompts=[item["prompt"]],
+        )
+        aggregate = aggregate_single_turn_metrics(metrics)
+        self.assertEqual(aggregate["turn_1/eval_panel_id"], 1.0)
+        self.assertEqual(aggregate["turn_1/eval_sample_count"], 1.0)
+        table = aggregate["turn_1/eval_samples"]
+        self.assertIn("agent_0_output", table.columns)
+        self.assertIn("agent_1_output", table.columns)
+        self.assertIn("merged_plan", table.columns)
+        self.assertIn("reward", table.columns)
+        self.assertIn("protocol_progress", table.columns)
+        self.assertIn("recovered_semantic_balance", table.columns)
+        self.assertIn("required_cooperative_contribution", table.columns)
+        self.assertEqual(table.data[0][table.columns.index("reward")], 1.0)
 
     def test_eval_logger_fails_loudly_on_unknown_prompt(self):
         logger = build_single_turn_eval_logger([fixture_item()])

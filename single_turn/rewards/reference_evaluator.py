@@ -280,16 +280,112 @@ def parse_reference_catalog(reference_information: str) -> ReferenceCatalog:
     )
 
 
+def coerce_trip_dates(batch_item: Mapping[str, Any]) -> List[str]:
+    """Return normalized trip dates without consulting any target itinerary."""
+
+    dates = batch_item.get("dates")
+    if not isinstance(dates, (list, tuple)):
+        dates = batch_item.get("date", [])
+    if isinstance(dates, str):
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                parsed = loader(dates)
+            except (ValueError, SyntaxError, TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, (list, tuple)):
+                dates = parsed
+                break
+        else:
+            dates = []
+    if not isinstance(dates, (list, tuple)):
+        return []
+    return [str(value).strip() for value in dates]
+
+
+def derive_route_scaffold(
+    batch_item: Mapping[str, Any],
+    catalog: ReferenceCatalog | None = None,
+) -> List[Tuple[str, str, str]]:
+    """Derive the shared move/stay structure shown to both agents.
+
+    This uses only query metadata and dated reference routes, never an
+    annotated or target plan.  The same immutable structure drives both the
+    prompt and the reward's required-slot mask, so one agent cannot redefine
+    its teammate's workload through its generated ``current_city`` values.
+    """
+
+    days = int(batch_item.get("days", 0))
+    dates = coerce_trip_dates(batch_item)
+    if catalog is None:
+        catalog = parse_reference_catalog(
+            str(batch_item.get("reference_information", ""))
+        )
+
+    routes_by_date: Dict[str, set[Tuple[str, str]]] = {}
+    for entry in catalog.transportation:
+        if entry.date and entry.origin and entry.destination:
+            routes_by_date.setdefault(entry.date, set()).add(
+                (entry.origin, entry.destination)
+            )
+
+    records = batch_item.get("reference_records")
+    if not isinstance(records, list):
+        records = _safe_records(str(batch_item.get("reference_information", "")))
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        description = str(record.get("Description", "")).strip()
+        match = re.fullmatch(
+            r"Flight\s+from\s+(.+?)\s+to\s+(.+?)\s+on\s+"
+            r"(\d{4}-\d{2}-\d{2})",
+            description,
+            flags=re.I,
+        )
+        if match:
+            origin, destination, date = match.groups()
+            routes_by_date.setdefault(date, set()).add((origin, destination))
+
+    current_city = str(batch_item.get("org", "")).strip()
+    scaffold: List[Tuple[str, str, str]] = []
+    for day in range(1, days + 1):
+        date = dates[day - 1] if day <= len(dates) else ""
+        candidates = sorted(
+            routes_by_date.get(date, ()),
+            key=lambda route: (route[0].casefold(), route[1].casefold()),
+        )
+        matching = [
+            route
+            for route in candidates
+            if current_city
+            and canonical_value(route[0]) == canonical_value(current_city)
+        ]
+        route = (matching or candidates)[0] if candidates else None
+        if route is None:
+            scaffold.append(("stay", current_city, current_city))
+            continue
+        origin, destination = route
+        scaffold.append(("move", origin, destination))
+        current_city = destination
+    return scaffold
+
+
 def parse_current_city(value: Any) -> Tuple[str, str, str] | None:
     text = str(value or "").strip()
     if not text or canonical_value(text) == "-":
         return None
     match = re.fullmatch(r"from\s+(.+?)\s+to\s+(.+?)", text, flags=re.I)
     if match:
+        origin = match.group(1).strip()
+        destination = match.group(2).strip()
+        # A stay day must use the single-city form.  Treating ``from X to X``
+        # as a move lets the logistics role erase every experience slot that
+        # would otherwise be required on that day.
+        if canonical_value(origin) == canonical_value(destination):
+            return None
         return (
             "move",
-            match.group(1).strip(),
-            match.group(2).strip(),
+            origin,
+            destination,
         )
     return ("stay", text, text)
 
@@ -367,10 +463,24 @@ def _mean(values: Sequence[float], default: float = 0.0) -> float:
     return sum(values) / len(values) if values else default
 
 
+def _route_row_matches(
+    actual: Tuple[str, str, str] | None,
+    expected: Tuple[str, str, str] | None,
+) -> bool:
+    return bool(
+        actual is not None
+        and expected is not None
+        and actual[0] == expected[0]
+        and canonical_value(actual[1]) == canonical_value(expected[1])
+        and canonical_value(actual[2]) == canonical_value(expected[2])
+    )
+
+
 def _route_evaluation(
     plan: Sequence[Mapping[str, Any]],
     batch_item: Mapping[str, Any],
     catalog: ReferenceCatalog,
+    expected_scaffold: Sequence[Tuple[str, str, str]],
 ) -> Dict[str, Any]:
     days = int(batch_item.get("days", 0))
     origin = canonical_value(batch_item.get("org", ""))
@@ -424,6 +534,14 @@ def _route_evaluation(
     destination = canonical_value(batch_item.get("dest", ""))
     destination_applicable = destination in allowed
     destination_reached = float(not destination_applicable or destination in visited)
+    scaffold_match_bits = []
+    for day in range(days):
+        actual = parsed[day] if day < len(parsed) else None
+        expected = (
+            expected_scaffold[day] if day < len(expected_scaffold) else None
+        )
+        scaffold_match_bits.append(float(_route_row_matches(actual, expected)))
+    scaffold_match_rate = _mean(scaffold_match_bits)
     components = [
         parse_rate,
         continuity_rate,
@@ -433,6 +551,7 @@ def _route_evaluation(
         allowed_city_rate,
         no_revisit,
         destination_reached,
+        scaffold_match_rate,
     ]
     return {
         "soft": _mean(components),
@@ -448,6 +567,7 @@ def _route_evaluation(
         "allowed_city_rate": allowed_city_rate,
         "no_revisit": no_revisit,
         "destination_reached": destination_reached,
+        "scaffold_match_rate": scaffold_match_rate,
     }
 
 
@@ -489,11 +609,15 @@ def _transport_validity(
     value: str,
     *,
     day: int,
-    route: Mapping[str, Any],
+    expected_scaffold: Sequence[Tuple[str, str, str]],
     dates: Sequence[str],
     catalog: ReferenceCatalog,
 ) -> Tuple[float, CatalogEntry | None]:
-    day_route = route["parsed"][day - 1]
+    day_route = (
+        expected_scaffold[day - 1]
+        if day - 1 < len(expected_scaffold)
+        else None
+    )
     if canonical_value(value) == "-":
         return (float(day_route is not None and day_route[0] == "stay"), None)
     entry = match_transport(value, catalog)
@@ -523,9 +647,13 @@ def evaluate_reference_plan(
     total_slots = max(1, len(PLAN_FIELDS) * days)
     catalog = parse_reference_catalog(str(batch_item.get("reference_information", "")))
     plan = result.plan[:days]
-    route = _route_evaluation(plan, batch_item, catalog)
-    required = _required_slots(route, days)
-    dates = batch_item.get("dates", []) or []
+    expected_scaffold = derive_route_scaffold(batch_item, catalog)
+    route = _route_evaluation(plan, batch_item, catalog, expected_scaffold)
+    # The required work surface is fixed before either policy acts.  It is the
+    # same reference-derived scaffold shown in both prompts, not a mask inferred
+    # from agent 0's generated route.
+    required = _required_slots({"parsed": expected_scaffold}, days)
+    dates = coerce_trip_dates(batch_item)
 
     slot_validity: Dict[Tuple[int, str], float] = {}
     selected_entries: Dict[Tuple[int, str], List[CatalogEntry]] = {}
@@ -539,7 +667,23 @@ def evaluate_reference_plan(
     people = max(1, int(batch_item.get("people_number", 1) or 1))
 
     for day, row in enumerate(plan, start=1):
-        day_cities = route["day_cities"][day - 1]
+        expected_day_route = (
+            expected_scaffold[day - 1]
+            if day - 1 < len(expected_scaffold)
+            else None
+        )
+        expected_day_cities = (
+            (
+                expected_day_route[1],
+                expected_day_route[2],
+            )
+            if expected_day_route is not None and expected_day_route[0] == "move"
+            else (
+                (expected_day_route[1],)
+                if expected_day_route is not None
+                else ()
+            )
+        )
         for field in PLAN_FIELDS:
             slot = (day, field)
             value = str(row.get(field, "-") or "-").strip() or "-"
@@ -549,13 +693,14 @@ def evaluate_reference_plan(
 
             if field == "current_city":
                 valid = float(
-                    route["parsed"][day - 1] is not None
-                    and route["day_validity"][day - 1] >= 1.0
+                    _route_row_matches(
+                        route["parsed"][day - 1], expected_day_route
+                    )
                     and all(
                         canonical_value(city) in catalog.allowed_cities
                         or canonical_value(city)
                         == canonical_value(batch_item.get("org", ""))
-                        for city in day_cities
+                        for city in expected_day_cities
                     )
                 )
                 slot_validity[slot] = valid
@@ -563,7 +708,7 @@ def evaluate_reference_plan(
                 valid, entry = _transport_validity(
                     value,
                     day=day,
-                    route=route,
+                    expected_scaffold=expected_scaffold,
                     dates=dates,
                     catalog=catalog,
                 )
@@ -596,7 +741,9 @@ def evaluate_reference_plan(
                 # day. Other entity fields retain the public evaluator's
                 # looser travel-day start/end-city convention.
                 valid_cities = (
-                    day_cities[-1:] if field == "accommodation" else day_cities
+                    expected_day_cities[-1:]
+                    if field == "accommodation"
+                    else expected_day_cities
                 )
                 city_valid = grounded and all(
                     _city_consistent(entry, valid_cities)
@@ -844,6 +991,9 @@ def evaluate_reference_plan(
         "ultimate/reference_plan_delivery": delivered,
         "ultimate/reference_grounding": float(grounding_precision >= 1.0 - 1e-9),
         "ultimate/reference_reasonable_route": float(route["pass"]),
+        "ultimate/reference_route_scaffold_match": float(
+            route["scaffold_match_rate"] >= 1.0 - 1e-9
+        ),
         "ultimate/reference_complete_information": commonsense_pass_values[
             "complete_information"
         ],
@@ -874,7 +1024,13 @@ def evaluate_reference_plan(
         "route_closed_loop": float(route["closed_loop"]),
         "route_visiting_city_count": float(route["visiting_city_count"]),
         "route_allowed_city_rate": float(route["allowed_city_rate"]),
+        "route_scaffold_match_rate": float(route["scaffold_match_rate"]),
         "slot_validity": slot_validity,
+        # Internal structured surface consumed by the decentralized evaluator.
+        # It is removed before scalar logging, just like ``slot_validity``.
+        "required_slot_validity": {
+            slot: slot_validity.get(slot, 0.0) for slot in required
+        },
         "_aggregate/commonsense_pass_count": float(commonsense_pass_count),
         "_aggregate/commonsense_applicable_count": float(len(commonsense_pass_values)),
         "_aggregate/hard_pass_count": float(hard_pass_count),

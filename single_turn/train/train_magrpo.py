@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -135,7 +136,65 @@ def _contract_probe_completions(batch_item: Dict[str, Any]) -> List[str]:
     ]
 
 
-def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) -> None:
+def _curriculum_plan(
+    config: Config, train_rows: Sequence[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Resolve and validate the Travel-only short-trip curriculum."""
+
+    magrpo = config.get_section("magrpo")
+    epochs = int(magrpo.get("num_train_epochs", 1))
+    short_epochs = int(config.get("travel.curriculum_short_epochs", 0))
+    raw_days = config.get("travel.curriculum_days", [3])
+    if not isinstance(raw_days, (list, tuple)) or not raw_days:
+        raise ValueError("travel.curriculum_days must be a non-empty list.")
+    curriculum_days = sorted({int(day) for day in raw_days})
+    if short_epochs < 0:
+        raise ValueError("travel.curriculum_short_epochs must be non-negative.")
+    if short_epochs and short_epochs >= epochs:
+        raise ValueError(
+            "travel.curriculum_short_epochs must be smaller than "
+            "magrpo.num_train_epochs."
+        )
+
+    short_rows = [
+        row for row in train_rows if int(row.get("days", 0)) in curriculum_days
+    ]
+    if short_epochs and not short_rows:
+        raise ValueError("The configured curriculum_days select no training rows.")
+    full_ids = [str(row.get("source_index", row.get("id"))) for row in train_rows]
+    if len(full_ids) != len(set(full_ids)):
+        raise ValueError("The full Travel training split contains duplicate rows.")
+
+    num_generations = int(magrpo.get("num_generations", 4))
+    if num_generations < 2:
+        raise ValueError("magrpo.num_generations must be at least 2 for MAGRPO.")
+    full_epochs = epochs - short_epochs
+    prompt_exposures = short_epochs * len(short_rows) + full_epochs * len(train_rows)
+    buffer_size = int(magrpo.get("rollout_buffer_size", 1))
+    if buffer_size < 1:
+        raise ValueError("magrpo.rollout_buffer_size must be positive.")
+    optimizer_updates = short_epochs * math.ceil(
+        len(short_rows) / buffer_size
+    ) + full_epochs * math.ceil(len(train_rows) / buffer_size)
+    return {
+        "short_rows": short_rows,
+        "short_days": curriculum_days,
+        "short_epochs": short_epochs,
+        "full_epochs": full_epochs,
+        "short_prompt_exposures": short_epochs * len(short_rows),
+        "full_prompt_exposures": full_epochs * len(train_rows),
+        "prompt_exposures": prompt_exposures,
+        "expected_env_steps": prompt_exposures * num_generations,
+        "optimizer_updates_per_agent": optimizer_updates,
+    }
+
+
+def _dry_run(
+    config: Config,
+    train_rows: Sequence[Dict[str, Any]],
+    eval_rows,
+    curriculum: Dict[str, Any],
+) -> None:
     magrpo = config.get_section("magrpo")
     reward_cfg = config.get_section("travel_reward")
     sample = train_rows[0]
@@ -147,7 +206,7 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
     )
     num_generations = int(magrpo.get("num_generations", 4))
     epochs = int(magrpo.get("num_train_epochs", 1))
-    expected_env_steps = len(train_rows) * epochs * num_generations
+    expected_env_steps = int(curriculum["expected_env_steps"])
     formatters = get_single_turn_formatters(
         num_agents=int(magrpo.get("num_agents", 2)),
         role_mode=str(config.get("travel.role_mode", "partitioned_roles")),
@@ -172,7 +231,22 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
         "expected_env_steps": expected_env_steps,
         "expected_agent_completions": expected_env_steps
         * int(magrpo.get("num_agents", 2)),
+        "expected_optimizer_updates_per_agent": curriculum[
+            "optimizer_updates_per_agent"
+        ],
+        "curriculum": {
+            "short_days": curriculum["short_days"],
+            "short_rows": len(curriculum["short_rows"]),
+            "short_epochs": curriculum["short_epochs"],
+            "short_env_steps": curriculum["short_prompt_exposures"]
+            * num_generations,
+            "full_rows": len(train_rows),
+            "full_epochs": curriculum["full_epochs"],
+            "full_env_steps": curriculum["full_prompt_exposures"]
+            * num_generations,
+        },
         "eval_at_end": _bool(magrpo.get("eval_at_end", True), default=True),
+        "greedy_eval": _bool(config.get("travel.greedy_eval", True), default=True),
         "periodic_eval_samples": int(magrpo.get("eval_num_samples", 4)),
         "final_eval_samples": int(magrpo.get("final_eval_num_samples", len(eval_rows))),
         "rotate_eval_subset": _bool(
@@ -184,6 +258,9 @@ def _dry_run(config: Config, train_rows: Sequence[Dict[str, Any]], eval_rows) ->
         "all_dash_contract_probe_team_action_valid": details["team_action_valid"],
         "all_dash_contract_probe_required_grounded_recall": details[
             "required_grounded_recall"
+        ],
+        "all_dash_contract_probe_required_cooperative_contribution": details[
+            "required_cooperative_contribution"
         ],
         "sample_reference_catalog_counts": details["reference_catalog_counts"],
         "reference_catalog_success_rows": sum(catalog_successes),
@@ -217,6 +294,7 @@ def main() -> None:
         config.update(parse_overrides(args.override))
 
     train_rows, eval_rows = _load_data(config)
+    curriculum = _curriculum_plan(config, train_rows)
     catalog_failures = [
         str(row.get("id", row.get("source_index", "unknown")))
         for row in [*train_rows, *eval_rows]
@@ -253,7 +331,7 @@ def main() -> None:
         raise ValueError("magrpo.final_eval_num_samples must lie within the eval pool.")
 
     if args.dry_run:
-        _dry_run(config, train_rows, eval_rows)
+        _dry_run(config, train_rows, eval_rows, curriculum)
         return
 
     import torch
@@ -359,7 +437,11 @@ def main() -> None:
         formatters=formatters,
         external_transition=None,
         wandb_config=_wandb_config(config, output_dir, magrpo_section),
-        eval_logger=build_single_turn_eval_logger(eval_rows),
+        eval_logger=build_single_turn_eval_logger(
+            eval_rows,
+            reward_config=reward.config,
+            panel_size=int(magrpo_section.get("eval_num_samples", 4)),
+        ),
         eval_aggregator=aggregate_single_turn_metrics,
         args=trainer_args,
         chat_formatted_prompts=use_chat_template,
@@ -370,6 +452,11 @@ def main() -> None:
         rotate_eval_subset=_bool(
             magrpo_section.get("rotate_eval_subset", False), default=False
         ),
+        greedy_eval=_bool(config.get("travel.greedy_eval", True), default=True),
+        curriculum_train_dataset=(
+            curriculum["short_rows"] if curriculum["short_epochs"] else None
+        ),
+        curriculum_short_epochs=int(curriculum["short_epochs"]),
     )
     if _bool(config.get("agent_model.gradient_checkpointing", True), default=True):
         for agent in trainer.agents:

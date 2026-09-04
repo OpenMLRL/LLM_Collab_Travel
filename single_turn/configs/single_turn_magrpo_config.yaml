@@ -51,36 +51,46 @@ travel:
   system_prompt: >-
     You are one agent in a decentralized travel-planning team. Follow the user's
     role and output contract exactly. Return only the requested JSON object.
+    Close the assignments array with ] before the final top-level }.
   # Strict decoding prefills the fixed JSON schema through the opening quote of
   # each role's first value (not sampled policy tokens), then stops each
   # sequence independently at its matching top-level "}".
   force_json_prefix: true
   stop_after_complete_json: true
+  # Periodic eval uses greedy argmax on the fixed P1 anchor; training remains
+  # stochastic with the model sampling settings above.
+  greedy_eval: true
+  # Spend the first 960 env steps on all 30 three-day rows, then expose the
+  # complete 60-row split for the remaining 4080 steps.
+  curriculum_short_epochs: 8
+  curriculum_days: [3]
 
 travel_reward:
-  # Reward v5 keeps malformed/partial generations distinguishable while the
-  # reward-independent ultimate evaluator remains strict.
-  parse_weight: 0.05
-  format_progress_weight: 0.10
-  assignment_progress_weight: 0.10
-  quoted_grounding_weight: 0.10
-  plan_quality_weight: 0.70
-  # These five terms sum to the unit plan-quality score.
-  assignment_coverage_weight: 0.10
-  required_grounded_weight: 0.15
-  grounding_f1_weight: 0.15
-  commonsense_weight: 0.35
-  hard_constraint_weight: 0.25
+  # Reward v7 reserves 91% of its positive range for strict joint quality and
+  # final success. The two 0.02/0.03 dense channels make early malformed
+  # rollouts rankable but cannot substitute for a valid team action.
+  protocol_progress_weight: 0.02
+  recovered_semantic_weight: 0.03
+  action_validity_weight: 0.04
+  team_action_weight: 0.02
+  strict_balance_weight: 0.14
+  strict_quality_weight: 0.57
+  strict_grounding_weight: 0.08
   final_success_bonus: 0.10
-  overlap_penalty: 0.10
-  conflict_penalty: 0.20
+  # These five terms sum to the unit plan-quality score.
+  assignment_coverage_weight: 0.20
+  required_grounded_weight: 0.25
+  grounding_f1_weight: 0.15
+  commonsense_weight: 0.25
+  hard_constraint_weight: 0.15
+  grounding_support_floor: 0.10
   invalid_action_penalty: 0.10
-  contribution_deficit_penalty: 0.15
-  protocol_deficit_penalty: 0.15
-  reference_copy_penalty: 0.25
-  overlong_penalty: 0.15
-  min_reward: -0.5
-  max_reward: 1.15
+  conflict_penalty: 0.05
+  overlap_penalty: 0.05
+  reference_copy_penalty: 0.10
+  overlong_penalty: 0.05
+  min_reward: -0.25
+  max_reward: 1.0
 
 magrpo:
   parallel_training: mp
@@ -89,9 +99,10 @@ magrpo:
   - cuda:1
   num_agents: 2
   num_turns: 1
-  # 60 prompts x 21 epochs x 4 aligned generations = 5040 env steps, within
-  # 1.6% of the current BFCL native-parallel MAGRPO budget (5120).
-  num_train_epochs: 21
+  # 8 x 30 short prompts + 17 x 60 full prompts, all with 4 aligned
+  # generations, gives 5040 env steps. This remains within 1.6% of BFCL's
+  # 5120-step budget and keeps 126 optimizer updates at buffer size 10.
+  num_train_epochs: 25
   agent_learning_rate: 2.0e-05
   logging_steps: 20
   num_generations: 4
@@ -107,11 +118,11 @@ magrpo:
   train_batch_size: 10
   advantage_normalization: false
   advantage_mode: mean
-  # Evaluate one balanced four-row panel at the start of each epoch. Five calls
-  # cover all 20 held-out rows; the terminal evaluation uses the full pool.
+  # Re-evaluate the same balanced four-row anchor panel so adjacent W&B points
+  # are comparable. The terminal evaluation still uses the full 20-row pool.
   eval_interval: 60
   eval_num_samples: 4
-  rotate_eval_subset: true
+  rotate_eval_subset: false
   final_eval_num_samples: 20
   eval_batch_size: 1
   eval_at_end: true
@@ -128,7 +139,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-dense-recovery-v5-60train
+  name: Travel-magrpo-qwen3-4b-learnable-v7-60train
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -137,8 +148,11 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
-  - reward-v5-dense-recovery
+  - reward-v7-learnable
+  - two-stage-3day-curriculum
+  - greedy-fixed-anchor
   - compact-role-catalogs
   - no-advantage-normalization
   - validation-simple-60train-20eval
   - structured-json
+  - fixed-anchor-eval

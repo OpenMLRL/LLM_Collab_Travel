@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import ast
 import json
-import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from single_turn.aggregation import PLAN_FIELDS, assignment_capacity, owned_slots
 from single_turn.rewards.reference_evaluator import (
     CatalogEntry,
     ReferenceCatalog,
+    coerce_trip_dates,
+    derive_route_scaffold,
     parse_reference_catalog,
 )
 from single_turn.structured_generation import (
@@ -86,90 +86,19 @@ def _unique_sorted(
     return sorted(unique.values(), key=key)
 
 
-def _coerce_dates(example: Dict[str, Any]) -> List[str]:
-    dates = example.get("dates")
-    if not isinstance(dates, (list, tuple)):
-        dates = example.get("date", [])
-    if isinstance(dates, str):
-        for loader in (json.loads, ast.literal_eval):
-            try:
-                parsed = loader(dates)
-            except (ValueError, SyntaxError, TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(parsed, (list, tuple)):
-                dates = parsed
-                break
-        else:
-            dates = []
-    if not isinstance(dates, (list, tuple)):
-        return []
-    return [str(value).strip() for value in dates]
-
-
-def _reference_records(example: Dict[str, Any]) -> List[Dict[str, Any]]:
-    records = example.get("reference_records")
-    if isinstance(records, list):
-        return [dict(record) for record in records if isinstance(record, dict)]
-    raw = example.get("reference_information", "")
-    if isinstance(raw, str):
-        for loader in (json.loads, ast.literal_eval):
-            try:
-                parsed = loader(raw)
-            except (ValueError, SyntaxError, TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(parsed, list):
-                return [
-                    dict(record) for record in parsed if isinstance(record, dict)
-                ]
-    return []
-
-
 def _route_scaffold(
     example: Dict[str, Any], catalog: ReferenceCatalog
 ) -> List[str]:
     """Derive one shared movement/stay scaffold from dated route records."""
 
-    days = int(example.get("days", 0))
-    dates = _coerce_dates(example)
-    routes_by_date: Dict[str, set[Tuple[str, str]]] = {}
-    for entry in catalog.transportation:
-        if entry.date and entry.origin and entry.destination:
-            routes_by_date.setdefault(entry.date, set()).add(
-                (entry.origin, entry.destination)
-            )
-    # The catalog intentionally omits unavailable flights, but their dated
-    # reference descriptions still define the trip's route. Keep that route
-    # signal even when the usable choice must be taxi or self-driving.
-    for record in _reference_records(example):
-        description = str(record.get("Description", "")).strip()
-        match = re.fullmatch(
-            r"Flight\s+from\s+(.+?)\s+to\s+(.+?)\s+on\s+"
-            r"(\d{4}-\d{2}-\d{2})",
-            description,
-            flags=re.I,
-        )
-        if match:
-            origin, destination, date = match.groups()
-            routes_by_date.setdefault(date, set()).add((origin, destination))
-
-    current_city = str(example.get("org", "")).strip()
+    dates = coerce_trip_dates(example)
     lines: List[str] = []
-    for day in range(1, days + 1):
+    for day, (kind, origin, destination) in enumerate(
+        derive_route_scaffold(example, catalog), start=1
+    ):
         date = dates[day - 1] if day <= len(dates) else ""
-        candidates = sorted(
-            routes_by_date.get(date, ()),
-            key=lambda route: (route[0].casefold(), route[1].casefold()),
-        )
-        matching = [
-            route
-            for route in candidates
-            if current_city and route[0].casefold() == current_city.casefold()
-        ]
-        route = (matching or candidates)[0] if candidates else None
         date_text = f" date={date}" if date else ""
-        if route is not None:
-            origin, destination = route
-            current_city = destination
+        if kind == "move":
             city_value = f"from {origin} to {destination}"
             lines.append(
                 f"- day={day}{date_text} kind=move "
@@ -177,7 +106,7 @@ def _route_scaffold(
                 "transportation=choose_exact_catalog_option_for_this_route"
             )
         else:
-            city_value = current_city or "unknown"
+            city_value = destination or "unknown"
             lines.append(
                 f"- day={day}{date_text} kind=stay "
                 f"current_city={json.dumps(city_value, ensure_ascii=False)} "
@@ -412,7 +341,9 @@ def build_single_turn_formatter(
   emit all remaining owned assignments in the listed order.
 - The complete reconstructed response must begin exactly with the prefill and obey
   the same JSON schema and assignment count.
-- Your response must end exactly with this character sequence:
+- After the final assignment object's "}}", close the assignments array before
+  closing the top-level object. Never emit the top-level "}}" while the array is open.
+- Your response must end exactly with these two characters (with nothing after them):
   ]}}
 
 ASSISTANT PREFILL (already supplied; do not repeat it):

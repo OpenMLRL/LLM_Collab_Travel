@@ -136,7 +136,9 @@ def evaluate_single_turn_response(
 
     plan_detail = evaluate_reference_plan(result, batch_item=batch_item)
     slot_validity = plan_detail.pop("slot_validity")
+    required_slot_validity = plan_detail.pop("required_slot_validity")
     verified_contribution_ratios: List[float] = []
+    required_grounded_contribution_ratios: List[float] = []
     for agent_idx, assignments in enumerate(result.per_agent_assignments):
         owned = owned_slots(agent_idx, days)
         # A conflicting assignment is deliberately removed by the merger. It
@@ -148,7 +150,25 @@ def evaluate_single_turn_response(
             if slot in owned and slot in result.merged_assignments
         )
         verified_contribution_ratios.append(verified / max(1, len(owned)))
+        required_owned = owned & set(required_slot_validity)
+        required_verified = sum(
+            float(required_slot_validity.get(slot, 0.0))
+            for slot in required_owned
+            if slot in assignments and slot in result.merged_assignments
+        )
+        required_grounded_contribution_ratios.append(
+            required_verified / len(required_owned) if required_owned else 0.0
+        )
     cooperative_contribution = _harmonic_mean(verified_contribution_ratios)
+    contribution_mean = sum(required_grounded_contribution_ratios) / len(
+        required_grounded_contribution_ratios
+    )
+    contribution_min = min(required_grounded_contribution_ratios)
+    # Keep some progress from the stronger role visible, but make the weaker
+    # role dominate. A fully lazy teammate therefore caps this signal at 0.10.
+    required_cooperative_contribution = (
+        0.2 * contribution_mean + 0.8 * contribution_min
+    )
     contribution_deficit = 1.0 - cooperative_contribution
 
     raw_assignment_count = sum(parsed.raw_item_count for parsed in result.parsed)
@@ -164,6 +184,13 @@ def evaluate_single_turn_response(
     both_agents_verified = float(
         bool(verified_contribution_ratios)
         and all(value >= 1.0 - 1e-9 for value in verified_contribution_ratios)
+    )
+    both_agents_required_grounded = float(
+        bool(required_grounded_contribution_ratios)
+        and all(
+            value >= 1.0 - 1e-9
+            for value in required_grounded_contribution_ratios
+        )
     )
     conflict_free = float(result.overlap_count == 0 and not result.conflict_slots)
     collaboration_success = float(
@@ -183,6 +210,9 @@ def evaluate_single_turn_response(
         "team_action_valid": float(team_action_valid),
         "team_soft_action_validity": float(team_soft_action_validity),
         "cooperative_contribution": float(cooperative_contribution),
+        "required_cooperative_contribution": float(
+            required_cooperative_contribution
+        ),
         "contribution_deficit": float(contribution_deficit),
         "overlap_count": float(result.overlap_count),
         "overlap_rate": float(overlap_rate),
@@ -202,13 +232,19 @@ def evaluate_single_turn_response(
         "count_fidelity": count_fidelity_scores,
         "item_acceptance": item_acceptance_scores,
         "verified_contribution_ratios": verified_contribution_ratios,
+        "required_grounded_contribution_ratios": (
+            required_grounded_contribution_ratios
+        ),
         "ultimate/team_action_success": float(team_action_valid),
         "ultimate/both_agent_verified_contribution": both_agents_verified,
+        "ultimate/both_agent_required_grounded_contribution": (
+            both_agents_required_grounded
+        ),
         "ultimate/conflict_free": conflict_free,
         "ultimate/collaboration_success": collaboration_success,
         "merged_plan": result.plan,
         "parser_errors": [list(parsed.error_codes) for parsed in result.parsed],
-        "evaluation_backend": "reference_constraint_v1",
+        "evaluation_backend": "reference_constraint_scaffold_v2",
         **plan_detail,
     }
 
@@ -220,6 +256,9 @@ def evaluate_single_turn_response(
         "count_fidelity": count_fidelity_scores,
         "item_acceptance": item_acceptance_scores,
         "verified_contribution": verified_contribution_ratios,
+        "required_grounded_contribution": (
+            required_grounded_contribution_ratios
+        ),
         "assignment_count": result.agent_assignment_counts,
     }
     for metric_name, values in per_agent_sequences.items():

@@ -4,7 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from transformers import (
@@ -24,10 +24,14 @@ from comlrl.trainers.reinforce import MAGRPOTrainer
 from single_turn.formatting import build_agent_json_prefill
 from single_turn.structured_generation import (
     CompleteJSONObjectCriteria,
+    GreedyArgmaxLogitsProcessor,
     apply_chat_template,
+    with_greedy_argmax_processor,
     wrap_formatter_with_chat_template,
 )
 from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer
+from single_turn.train.train_magrpo import _curriculum_plan
+from single_turn.config import Config
 
 
 class FakeTokenizer:
@@ -185,6 +189,132 @@ class ChatTemplateTests(unittest.TestCase):
 
 
 class JSONGenerationConstraintTests(unittest.TestCase):
+    def test_greedy_eval_processor_resolves_logit_ties_by_argmax(self):
+        processor = GreedyArgmaxLogitsProcessor()
+        scores = torch.tensor([[5.0, 5.0, 4.0], [1.0, 2.0, 2.0]])
+        constrained = processor(torch.zeros((2, 1), dtype=torch.long), scores)
+        self.assertEqual(
+            torch.isfinite(constrained).nonzero().tolist(), [[0, 0], [1, 1]]
+        )
+
+    def test_greedy_eval_helper_preserves_existing_processors_without_mutation(self):
+        existing = LogitsProcessorList([_ForceDifferentJSONRows(2)])
+        combined = with_greedy_argmax_processor(existing)
+        self.assertEqual(len(existing), 1)
+        self.assertEqual(len(combined), 2)
+        self.assertIs(combined[0], existing[0])
+        self.assertIsInstance(combined[-1], GreedyArgmaxLogitsProcessor)
+
+    def test_eval_flag_is_scoped_to_evaluation_and_restored(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer._travel_eval_generation = False
+        trainer.rotate_eval_subset = False
+        trainer.eval_dataset = [{}]
+        observed = []
+
+        def fake_evaluate(base_trainer, num_eval_samples=None):
+            observed.append(base_trainer._travel_eval_generation)
+            return {"count": float(num_eval_samples)}
+
+        with patch.object(MAGRPOTrainer, "evaluate", autospec=True) as evaluate:
+            evaluate.side_effect = fake_evaluate
+            result = trainer.evaluate(num_eval_samples=1)
+
+        self.assertEqual(result, {"count": 1.0})
+        self.assertEqual(observed, [True])
+        self.assertFalse(trainer._travel_eval_generation)
+
+    def test_eval_flag_is_restored_after_failure(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer._travel_eval_generation = False
+        trainer.rotate_eval_subset = False
+        trainer.eval_dataset = [{}]
+        with patch.object(
+            MAGRPOTrainer, "evaluate", autospec=True, side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                trainer.evaluate(num_eval_samples=1)
+        self.assertFalse(trainer._travel_eval_generation)
+
+    def test_travel_eval_metrics_log_samples_and_aliases_in_one_wandb_step(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.eval_logger = lambda **_kwargs: [{"sample_id": "x"}]
+        trainer.eval_aggregator = lambda _rows, num_turns: {
+            "turn_1/eval_samples": "sample-table",
+            "turn_1/ultimate/team_action_success": 0.5,
+        }
+        trainer.args = SimpleNamespace(num_turns=1)
+        trainer.wandb_initialized = True
+        trainer.env_step = 240
+        trainer.rotate_eval_subset = False
+        trainer._travel_eval_baseline = {"reward": 0.5}
+        fake_wandb = SimpleNamespace(
+            run=object(),
+            log=Mock(),
+            Table=lambda **kwargs: kwargs,
+        )
+
+        with patch(
+            "single_turn.train.structured_trainer.wandb", fake_wandb
+        ):
+            metrics = trainer._log_eval_metrics(
+                all_agent_completions_turns=[[["a0"]], [["a1"]]],
+                all_test_cases=[""],
+                all_entry_points=[""],
+                all_prompts=["prompt"],
+                extra_metrics={"eval/turn_1/reward_mean": 0.75},
+            )
+
+        self.assertEqual(metrics["eval/reward"], 0.75)
+        self.assertEqual(metrics["eval/turn_1/reward"], 0.75)
+        self.assertEqual(metrics["eval/team_action_success"], 0.5)
+        self.assertEqual(metrics["eval/turn_1/eval_samples"], "sample-table")
+        self.assertEqual(metrics["eval/delta/reward"], 0.25)
+        self.assertIn("eval/headline_summary", metrics)
+        fake_wandb.log.assert_called_once()
+        self.assertEqual(fake_wandb.log.call_args.kwargs["step"], 240)
+        self.assertTrue(fake_wandb.log.call_args.kwargs["commit"])
+
+    def test_final_eval_separates_full_pool_from_anchor_curve(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.eval_logger = lambda **_kwargs: [
+            {"_eval_sample": {"reward": index / 10.0}} for index in range(5)
+        ]
+        trainer.eval_aggregator = lambda rows, num_turns: {
+            "turn_1/eval_sample_count": float(len(rows)),
+            "turn_1/eval_samples": f"table-{len(rows)}",
+            "turn_1/ultimate/collaboration_success": len(rows) / 10.0,
+        }
+        trainer.args = SimpleNamespace(num_turns=1, eval_num_samples=2)
+        trainer.wandb_initialized = True
+        trainer.env_step = 5040
+        fake_wandb = SimpleNamespace(run=object(), log=Mock())
+
+        with patch(
+            "single_turn.train.structured_trainer.wandb", fake_wandb
+        ):
+            metrics = trainer._log_eval_metrics(
+                all_agent_completions_turns=[[["a0"]], [["a1"]]],
+                all_test_cases=[""],
+                all_entry_points=[""],
+                all_prompts=["prompt"],
+                extra_metrics={
+                    "eval/turn_1/reward_mean": 0.8,
+                    "eval/turn_1/expected_return": 0.8,
+                },
+            )
+
+        self.assertEqual(metrics["eval/turn_1/eval_sample_count"], 2.0)
+        self.assertEqual(metrics["eval_full/turn_1/eval_sample_count"], 5.0)
+        self.assertEqual(metrics["eval/turn_1/eval_samples"], "table-2")
+        self.assertEqual(metrics["eval_full/turn_1/eval_samples"], "table-5")
+        self.assertAlmostEqual(metrics["eval/turn_1/reward_mean"], 0.05)
+        self.assertEqual(metrics["eval_full/turn_1/reward_mean"], 0.8)
+        self.assertEqual(metrics["eval/reward"], 0.05)
+        self.assertEqual(metrics["eval_full/reward"], 0.8)
+        fake_wandb.log.assert_called_once()
+        self.assertTrue(fake_wandb.log.call_args.kwargs["commit"])
+
     def test_rotating_eval_cycles_through_held_out_pool(self):
         trainer = object.__new__(StructuredOutputMAGRPOTrainer)
         original = [{"id": index} for index in range(5)]
@@ -281,12 +411,31 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             (len(suffix),),
         )
 
+    def test_stop_criterion_terminates_an_unclosed_assignments_array_as_invalid(self):
+        tokenizer = FakeTokenizer()
+        prefix = build_agent_json_prefill(0, 3)
+        criterion = CompleteJSONObjectCriteria(
+            tokenizer,
+            prompt_length=2,
+            initial_text=prefix,
+        )
+        # This is the dominant failed-run shape: the assignment object closes,
+        # then a top-level brace is emitted before the assignments list's ']'.
+        malformed = 'from Alpha to Beta"} }'
+        malformed_ids = torch.tensor([[1, 2, *map(ord, malformed)]])
+        self.assertTrue(criterion(malformed_ids, torch.empty(1)).item())
+        self.assertEqual(criterion.completed_response_lengths, (len(malformed),))
+        self.assertTrue(criterion._states[0].invalid)
+        self.assertFalse(criterion._states[0].complete)
+
     def test_travel_trainer_injects_fresh_prefix_and_stop_constraints(self):
         tokenizer = FakeTokenizer()
         trainer = object.__new__(StructuredOutputMAGRPOTrainer)
         trainer.chat_formatted_prompts = True
         trainer.force_json_prefix = True
         trainer.stop_after_complete_json = True
+        trainer._travel_eval_generation = True
+        trainer.greedy_eval = True
         trainer.tokenizers = [tokenizer]
         trainer.formatters = [lambda item, external_prompts=None: item["prompt"]]
         prefix = build_agent_json_prefill(0, 3)
@@ -316,6 +465,9 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         call_kwargs = generate.call_args.kwargs
         self.assertIn("stopping_criteria", call_kwargs)
+        self.assertIsInstance(
+            call_kwargs["logits_processor"][-1], GreedyArgmaxLogitsProcessor
+        )
         self.assertEqual(
             call_kwargs["prompts_override"], ["rendered chat prompt" + prefix]
         )
@@ -418,6 +570,157 @@ class JSONGenerationConstraintTests(unittest.TestCase):
 
         self.assertEqual(generate.call_args.kwargs["prompts_override"], ["raw prompt"])
         self.assertNotIn("prompt_tokenizer_kwargs", generate.call_args.kwargs)
+        self.assertNotIn("logits_processor", generate.call_args.kwargs)
+
+    def test_greedy_eval_can_be_disabled(self):
+        tokenizer = FakeTokenizer()
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.chat_formatted_prompts = False
+        trainer.force_json_prefix = False
+        trainer.stop_after_complete_json = False
+        trainer._travel_eval_generation = True
+        trainer.greedy_eval = False
+        trainer.tokenizers = [tokenizer]
+        trainer.formatters = [lambda item, external_prompts=None: item["prompt"]]
+        base_result = {
+            "prompt_input_ids": torch.tensor([[2, 3]]),
+            "completion_input_ids": [[torch.tensor([ord("x")])]],
+            "completion_attention_mask": [[torch.tensor([1])]],
+            "completions": [["x"]],
+            "response_lens": [1],
+        }
+        with patch.object(
+            MAGRPOTrainer, "_generate_completions", return_value=base_result
+        ) as generate:
+            trainer._generate_completions(
+                object(), [{"prompt": "raw prompt"}], agent_idx=0
+            )
+        self.assertNotIn("logits_processor", generate.call_args.kwargs)
+
+
+class TravelCurriculumTests(unittest.TestCase):
+    def test_default_curriculum_preserves_5040_env_steps(self):
+        config = Config(
+            str(REPO_ROOT / "single_turn/configs/single_turn_magrpo_config.yaml")
+        )
+        rows = [
+            {"source_index": index, "days": 3 if index < 30 else 5}
+            for index in range(60)
+        ]
+        plan = _curriculum_plan(config, rows)
+        self.assertEqual(len(plan["short_rows"]), 30)
+        self.assertEqual(plan["short_epochs"], 8)
+        self.assertEqual(plan["full_epochs"], 17)
+        self.assertEqual(plan["expected_env_steps"], 5040)
+
+    def test_curriculum_dataloader_switches_without_replacing_full_dataset(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        full = [{"id": index} for index in range(4)]
+        short = full[:2]
+        trainer.train_dataset = full
+        trainer.curriculum_train_dataset = short
+        trainer.curriculum_short_epochs = 2
+        trainer._travel_training_active = True
+        trainer._travel_train_epoch_cursor = 0
+        observed = []
+
+        def fake_dataloader(base_trainer):
+            observed.append(base_trainer.train_dataset)
+            return base_trainer.train_dataset
+
+        with patch.object(
+            MAGRPOTrainer, "get_train_dataloader", autospec=True
+        ) as get_dataloader:
+            get_dataloader.side_effect = fake_dataloader
+            self.assertIs(trainer.get_train_dataloader(), short)
+            self.assertIs(trainer.get_train_dataloader(), short)
+            self.assertIs(trainer.get_train_dataloader(), full)
+
+        self.assertEqual(observed, [short, short, full])
+        self.assertIs(trainer.train_dataset, full)
+        self.assertEqual(trainer._travel_train_epoch_cursor, 3)
+
+    def test_curriculum_train_resets_state_and_cleans_up_after_failure(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.args = SimpleNamespace(num_train_epochs=2)
+        trainer._travel_training_active = False
+        trainer._travel_train_epoch_cursor = 99
+        trainer._travel_curriculum_stage = 1
+        trainer._travel_train_detail_groups = []
+        trainer.curriculum_short_epochs = 1
+
+        def fake_train(base_trainer, **_kwargs):
+            self.assertTrue(base_trainer._travel_training_active)
+            base_trainer._travel_train_epoch_cursor = 1
+            raise RuntimeError("boom")
+
+        with patch.object(MAGRPOTrainer, "train", autospec=True) as train:
+            train.side_effect = fake_train
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                trainer.train()
+        self.assertFalse(trainer._travel_training_active)
+        self.assertEqual(trainer._travel_curriculum_stage, 1)
+
+    def test_train_reward_diagnostics_include_signal_and_end_metrics(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer._travel_training_active = True
+        trainer._travel_eval_generation = False
+        trainer._travel_curriculum_stage = 0
+        trainer._travel_train_detail_groups = []
+        trainer.env_step = 8
+        details = [
+            {
+                "action_validity": 1.0,
+                "ultimate/team_action_success": 1.0,
+                "required_cooperative_contribution": value,
+                "required_grounded_recall": value,
+                "grounding_f1": value,
+                "plan_score": value,
+                "strict_composite_quality": value,
+                "protocol_progress": 1.0,
+                "recovered_semantic_balance": value,
+                "ultimate/collaboration_success": 0.0,
+            }
+            for value in (0.2, 0.4, 0.6, 0.8)
+        ]
+        trainer.reward_func = SimpleNamespace(drain_details=lambda: details)
+
+        with patch.object(
+            MAGRPOTrainer,
+            "_compute_rewards",
+            autospec=True,
+            return_value=[0.1, 0.2, 0.3, 0.4],
+        ):
+            rewards = trainer._compute_rewards([], [[], []], batch_items=[{}])
+
+        self.assertEqual(rewards, [0.1, 0.2, 0.3, 0.4])
+        record = trainer._travel_train_detail_groups[0]
+        self.assertEqual(record["_step"], 12.0)
+        self.assertAlmostEqual(record["train/reward"], 0.25)
+        self.assertGreater(record["train/reward_group_std"], 0.0)
+        self.assertEqual(record["train/nonzero_advantage_rate"], 1.0)
+        self.assertAlmostEqual(
+            record["train/required_cooperative_contribution"], 0.5
+        )
+        self.assertEqual(record["train/curriculum_stage"], 0.0)
+
+    def test_train_reward_diagnostics_are_attached_to_agent_zero_log(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer._travel_train_detail_groups = [
+            {"_step": 4.0, "train/reward": 0.2},
+            {"_step": 8.0, "train/reward": 0.4},
+        ]
+        base_result = {
+            "log_entries": [{"step": 8, "metrics": {"turn_1/reward_mean": 0.3}}]
+        }
+        with patch.object(
+            MAGRPOTrainer, "_process_buffer", autospec=True, return_value=base_result
+        ):
+            result = trainer._process_buffer(0, [])
+        self.assertAlmostEqual(
+            result["log_entries"][0]["metrics"]["train/reward"], 0.3
+        )
+        self.assertEqual(trainer._travel_train_detail_groups, [])
 
 
 if __name__ == "__main__":
