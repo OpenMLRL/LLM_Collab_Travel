@@ -198,7 +198,11 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "train/reference_budget_soft": "budget_constraint_soft",
             "train/reference_budget_pass": "ultimate/reference_budget_pass",
             "train/reference_commonsense_soft": "commonsense_soft",
+            "train/reference_commonsense_macro": (
+                "ultimate/reference_commonsense_macro"
+            ),
             "train/reference_hard_soft": "hard_constraint_soft",
+            "train/reference_hard_macro": "ultimate/reference_hard_macro",
             "train/required_plan_completion": (
                 "ultimate/required_plan_completion"
             ),
@@ -495,7 +499,11 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "reference_commonsense_micro": (
                 "turn_1/ultimate/reference_commonsense_micro"
             ),
+            "reference_commonsense_macro": (
+                "turn_1/ultimate/reference_commonsense_macro"
+            ),
             "reference_hard_micro": "turn_1/ultimate/reference_hard_micro",
+            "reference_hard_macro": "turn_1/ultimate/reference_hard_macro",
             "reference_plan_success": (
                 "turn_1/ultimate/reference_plan_success"
             ),

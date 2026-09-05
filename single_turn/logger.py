@@ -26,7 +26,9 @@ _EVAL_SCALAR_KEYS = (
     "ultimate/reference_plan_delivery",
     "ultimate/required_plan_completion",
     "ultimate/reference_commonsense_micro",
+    "ultimate/reference_commonsense_macro",
     "ultimate/reference_hard_micro",
+    "ultimate/reference_hard_macro",
     "ultimate/reference_budget_pass",
     "ultimate/reference_plan_success",
     "ultimate/collaboration_success",
@@ -159,7 +161,11 @@ def build_single_turn_eval_logger(
                 "commonsense_micro": detail[
                     "ultimate/reference_commonsense_micro"
                 ],
+                "commonsense_macro": detail[
+                    "ultimate/reference_commonsense_macro"
+                ],
                 "hard_micro": detail["ultimate/reference_hard_micro"],
+                "hard_macro": detail["ultimate/reference_hard_macro"],
                 "reference_plan_success": detail[
                     "ultimate/reference_plan_success"
                 ],
@@ -275,7 +281,9 @@ def aggregate_single_turn_metrics(
                 "plan_delivery",
                 "required_plan_completion",
                 "commonsense_micro",
+                "commonsense_macro",
                 "hard_micro",
+                "hard_macro",
                 "reference_plan_success",
                 "collaboration_success",
                 "parser_errors",

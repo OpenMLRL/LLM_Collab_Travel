@@ -127,7 +127,7 @@ The plan conventions are stated in both prompts:
   cities;
 - selected entities must come from the supplied reference information.
 
-## Learnable strict-first reference/constraint reward v8
+## Terminal-weighted reference/constraint reward v10
 
 Each row's reference information is parsed once into catalogs for restaurants,
 attractions, accommodations, flights, taxis, and self-driving routes. The
@@ -194,18 +194,22 @@ Two bounded learning channels operate below the strict gate. `P` is the same
 validity. `E` applies the same geometric composite to safely recovered required
 assignments and their recovered reference quality. Recovery uses the fixed
 reference-derived required-slot mask and rejects wrong-role, overflow, and
-route-changing assignments. Let `G` be strict required grounded recall and `U`
-strict final collaboration success. The shared MAGRPO reward is:
+route-changing assignments. Let `G` be strict required grounded recall, `D`
+strict budget pass, `M_c` commonsense macro pass, `M_h` hard-constraint macro
+pass, and `U` strict final collaboration success. The shared MAGRPO reward is:
 
 ```text
-R = 0.02 × P
-  + 0.03 × E
-  + 0.04 × V
-  + 0.02 × J
-  + 0.14 × J × B
-  + 0.57 × J × C
-  + 0.08 × J × G
-  + 0.10 × U
+R = 0.01 × P
+  + 0.01 × E
+  + 0.02 × V
+  + 0.01 × J
+  + 0.04 × J × B
+  + 0.22 × J × C
+  + 0.04 × J × G
+  + 0.12 × J × D
+  + 0.10 × J × M_c
+  + 0.18 × J × M_h
+  + 0.25 × U
   - 0.10 × invalid/rejected-action rate
   - 0.05 × conflict rate
   - 0.05 × overlap rate
@@ -215,13 +219,17 @@ R = 0.02 × P
 
 `R` is clamped to `[-0.25, 1.00]`. A strict, fully grounded,
 constraint-valid plan with verified contributions from both agents receives
-`1.00`.
+`1.00`. The non-terminal terms can contribute at most `0.35`; the other
+`0.65` is reserved for strict endpoint metrics. The three plan-level endpoint
+bonuses are gated by `J`, because a plan recovered from malformed text must not
+earn strict terminal credit. `U` already includes strict joint validity and
+full two-agent contribution.
 
 Reward-only recovery extracts complete `(day, field, value)` triples solely to
-rank malformed actions. The two early learning channels total `0.05` and never
+rank malformed actions. The two early learning channels total `0.02` and never
 feed strict `Q`, `B`, `G`, or any ultimate metric. Two invalid agents therefore
-receive at most `0.05` positive reward; with exactly one invalid agent the cap is
-`0.07` before penalties. A strict all-dash joint action receives exactly `0.08`,
+receive at most `0.02` positive reward; with exactly one invalid agent the cap is
+`0.03` before penalties. A strict all-dash joint action receives exactly `0.04`,
 far below a grounded collaboration. Copying a raw reference table is explicitly
 penalized.
 
@@ -233,9 +241,12 @@ longer mistaken for a complete object and cropped early.
 
 The default keeps `advantage_mode=mean` but disables per-prompt unit-variance
 normalization. Earlier runs either amplified near-zero numerical noise or
-optimized recovery while strict collaboration fell to zero. V8 keeps the v7
-positive weights and strict endpoint, while its 5%
-bounded pre-validity surface makes distinct early outputs rankable.
+optimized recovery while strict collaboration fell to zero. V10 retains a
+bounded repair signal, but reduces the scale of the common first-epoch
+JSON/grounding improvement and moves most positive mass to strict outcomes.
+Counterfactual scoring of two v9 traces reduced the combined step-0-to-120 eval
+jump from `0.627` to `0.362` without changing which early prompts had non-zero
+within-group reward variance.
 
 The rollout and train buffers are 10 prompts. This changes neither model memory
 residency nor the 5040-env-step budget, and averages a broader set of prompts per
@@ -273,7 +284,9 @@ W&B publishes only this compact surface:
 | `eval/reference_plan_delivery` | A non-empty plan is delivered (paper-style delivery, independent of correctness) | ↑ |
 | `eval/required_plan_completion` | Both strict role actions fill every scaffold-required slot | ↑ |
 | `eval/reference_commonsense_micro` | Passed commonsense checks divided by applicable checks | ↑ |
+| `eval/reference_commonsense_macro` | Fraction of plans passing every commonsense check | ↑ |
 | `eval/reference_hard_micro` | Passed hard constraints divided by applicable hard constraints | ↑ |
+| `eval/reference_hard_macro` | Fraction of plans passing every applicable hard constraint | ↑ |
 | `eval/reference_plan_success` | All commonsense and hard checks pass | ↑ |
 | `eval/collaboration_success` | Plan success plus valid team action and full two-role contribution | ↑ |
 
@@ -284,7 +297,9 @@ reward
 reference_plan_delivery
 required_plan_completion
 reference_commonsense_micro
+reference_commonsense_macro
 reference_hard_micro
+reference_hard_macro
 reference_plan_success
 team_action_success
 collaboration_success
@@ -314,7 +329,8 @@ Training logs expose `train/reward` plus the reward-independent
 `train/required_grounded_recall`, `train/grounding_f1`,
 `train/required_cost_completeness`, `train/reference_budget_soft`,
 `train/reference_budget_pass`,
-`train/reference_commonsense_soft`, `train/reference_hard_soft`, and
+`train/reference_commonsense_soft`, `train/reference_commonsense_macro`,
+`train/reference_hard_soft`, `train/reference_hard_macro`, and
 `train/collaboration_success`. `train/reward_group_std`,
 `train/nonzero_advantage_rate`, and `train/meaningful_advantage_rate` show
 whether the four aligned generations still provide an actual MAGRPO ranking
@@ -370,7 +386,7 @@ python -u single_turn/train/train_magrpo.py \
 ```
 
 W&B defaults to project `Travel` and run name
-`Travel-magrpo-qwen3-4b-learnable-v7-60train`.
+`Travel-magrpo-qwen3-4b-terminal-weighted-v10-60train`.
 
 ## Tests
 
