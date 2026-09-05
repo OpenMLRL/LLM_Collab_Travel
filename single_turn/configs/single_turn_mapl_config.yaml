@@ -1,0 +1,39 @@
+# Shared Travel contract/data/reward; do not fork the v9 domain implementation.
+extends: single_turn_magrpo_config.yaml
+
+travel:
+  curriculum_short_epochs: 0
+  preference_generation_batch_size: 1
+  offload_inactive_actors: true
+
+mapl:
+  parallel_training: none
+  agent_devices: [cuda:0, cuda:0]
+  num_agents: 2
+  num_turns: 1
+  joint_mode: aligned
+  agent_learning_rate: 2.0e-5
+  logging_steps: 20
+  max_new_tokens: 1024
+  rollout_buffer_size: 10
+  train_batch_size: 10
+  advantage_normalization: false
+  advantage_mode: mean
+  eval_interval: 60
+  eval_num_samples: 4
+  eval_batch_size: 1
+  reference_kl_enabled: false
+  preference_num_candidates: 20
+  preference_pairs_per_sample: 6
+  dpo_beta: 0.1
+  use_environment_step: true
+  environment_steps_per_pair: 2
+
+evaluation:
+  at_end: true
+  final_num_samples: 20
+
+wandb:
+  project: Travel
+  dir: null
+  tags: [travelplanner, mapl, reward-v9, single-b200, eval-only]

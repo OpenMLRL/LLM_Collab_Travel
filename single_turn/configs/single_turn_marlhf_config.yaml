@@ -1,0 +1,19 @@
+extends: single_turn_mapl_config.yaml
+algorithm: marlhf
+mapl:
+  # 21 * 60 * 4 = 5040 online joint rollouts, plus preference collection.
+  num_train_epochs: 21
+  rl_algorithm: magrpo
+  num_generations: 4
+  pair_selection: reward_gap
+  reward_model_name: Qwen/Qwen3-4B-Instruct-2507
+  reward_model_device: cuda:0
+  reward_learning_rate: 1.0e-5
+  reward_num_train_epochs: 1
+  reward_train_batch_size: 1
+  reward_max_length: 32768
+  reward_freeze_backbone: false
+output:
+  base_dir: output_single_turn_marlhf
+wandb:
+  name: Travel-marlhf-qwen3-4b-v9

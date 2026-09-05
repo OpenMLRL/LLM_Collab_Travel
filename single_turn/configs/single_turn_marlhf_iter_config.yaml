@@ -1,0 +1,18 @@
+extends: single_turn_marlhf_config.yaml
+algorithm: marlhf_iter
+mapl:
+  # 7 * 3 * 60 * 4 = 5040 online rollouts; refresh cost is additional.
+  num_iterations: 7
+  num_train_epochs: 3
+  pair_selection: comparator_reward
+  comparator_policy: current_copy
+  comparator_generation_mode: decentralized
+  comparator_devices: [cuda:0, cuda:0]
+  preference_scoring_reward: task
+  preference_replay_mode: lambda_decay
+  preference_replay_lambda: 0.8
+  log_reward_distribution: false
+output:
+  base_dir: output_single_turn_marlhf_iter
+wandb:
+  name: Travel-marlhf-iter-qwen3-4b-v9

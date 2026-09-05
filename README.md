@@ -365,9 +365,102 @@ python -u single_turn/train/train_magrpo.py \
 W&B defaults to project `Travel` and run name
 `Travel-magrpo-qwen3-4b-hard-budget-v9-60train`.
 
+## MAPL preference algorithms (one GPU)
+
+Travel now provides three adapters over the existing CoMLRL implementations:
+
+| Entry point | Training procedure | Default online/update budget |
+| --- | --- | --- |
+| `single_turn/train/train_marlhf.py` | Rank sampled joint actions with v9, fit a joint reward model once, then MAGRPO | 21 epochs × 60 prompts × 4 generations = 5040 online joint rollouts |
+| `single_turn/train/train_marlhf_iter.py` | Refresh comparisons and refit the reward model before each online stage | 7 iterations × 3 epochs × 60 × 4 = 5040 online joint rollouts |
+| `single_turn/train/train_madpo_iter.py` | Iteratively compare joint actions and apply joint DPO, with λ=0.8 replay | At most 7 iterations × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
+
+All three reuse the existing role prompts, strict JSON generation, deterministic
+merge, v9 task reward, 60/20 split, and four-example fixed eval anchor. Unlike
+MAGRPO's short-trip warm-up, these configurations use all 60 training rows from
+the outset. No target/annotated plan is used to generate preference labels.
+The iterative comparator is `current_copy`: the same pre-update actor weights
+with an independent random-number stream, not a separately trained critic. On
+the same device CoMLRL reuses those weights instead of cloning two more actors.
+
+MARLHF's learned training reward is **unbounded**; its scale is not the v9
+scale. Evaluation always bypasses the learned model and uses the unchanged v9
+task reward in **[-0.25, 1.0]** and the usual success metrics, making eval curves
+comparable across algorithms. W&B still uploads only `eval/*` scalars: no train,
+eval_full, iteration-distribution panels, or sample tables.
+
+Preference collection is additional compute: default MARLHF collects 1200
+joint candidates once, while each iterative configuration collects 16,800
+across seven refreshes (20 target + 20 comparator candidates per prompt).
+Ties produce no preference, so actual pair counts and completed update steps
+can be lower. MADPO's pair-counted steps include replay and are not fresh
+rollouts. These settings approximate the old plotted step budget, **not equal
+total compute**. The dry-run and final console report distinguish these counts.
+
+The defaults put both Qwen3-4B-Instruct-2507 actors on `cuda:0`, use SDPA and
+gradient checkpointing, and generate candidates one at a time. During actor
+updates, the inactive actor and its optimizer states move to CPU. During reward
+model fitting both actors move to CPU; the reward decoder has a scalar head
+without LM vocabulary logits. After fitting, the reward optimizer is released
+and the frozen reward model stays available for online scoring. Allow ample host
+RAM for offloading (requesting 128 GB is a reasonable starting point).
+This is designed for one B200 but has **not yet been profiled on a B200**;
+host transfer time and long-context activations still matter.
+
+Travel-specific preference records store the exact generated continuation IDs
+and value-token masks, including in replay. The assistant prefill is not
+duplicated in DPO targets, forced schema tokens carry no policy loss, and the
+final selected token is included. Value-token averaging follows Travel's
+existing policy setting. The joint DPO gradient is evaluated with one live
+winner/loser graph at a time; this requires zero dropout, as in the default
+Qwen3 actors. CoMLRL and the existing MAGRPO entrypoint are not modified.
+
+Configuration files support relative `extends`; common `mapl.*` overrides apply
+to the selected algorithm. Validate without loading any model weights:
+
+```bash
+python single_turn/train/train_marlhf.py --dry-run
+python single_turn/train/train_marlhf_iter.py --dry-run
+python single_turn/train/train_madpo_iter.py --dry-run
+```
+
+Run **one job per GPU**, for example:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TOKENIZERS_PARALLELISM=false \
+python -u single_turn/train/train_madpo_iter.py --override seed=42
+```
+
+Replace the entrypoint with either MARLHF entrypoint for that algorithm. For a
+minimal iterative smoke test, reduce collection as well as online updates:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TOKENIZERS_PARALLELISM=false \
+python -u single_turn/train/train_madpo_iter.py --override \
+  dataset.train_samples=1 dataset.eval_samples=1 \
+  mapl.num_iterations=1 mapl.num_train_epochs=1 \
+  mapl.preference_num_candidates=2 mapl.preference_pairs_per_sample=1 \
+  mapl.rollout_buffer_size=1 mapl.train_batch_size=1 \
+  mapl.eval_num_samples=1 mapl.eval_interval=0 \
+  evaluation.final_num_samples=1 wandb.enabled=false output.save_final_model=false
+```
+
+For non-iterative MARLHF omit `mapl.num_iterations`; MARLHF also supports
+`mapl.num_generations=2` for smoke runs. A tied smoke sample can produce zero
+updates; an all-tied run exits with an explicit error rather than reporting a
+successful training run. Check the final `preference_pairs` and `env_steps`.
+Each run writes its resolved
+configuration and final actors under a unique job/seed/time output directory;
+iterative preference replay stays in that run directory.
+
 ## Tests
 
-The unit tests do not load an LLM:
+The tests require no pretrained model download; preference-loop tests use tiny
+randomly initialized CPU models and scripted candidates:
 
 ```bash
 python -m unittest discover -s tests -v
@@ -380,6 +473,9 @@ reward-only repair cannot weaken ultimate metrics, W&B receives only fixed-ancho
 eval scalars, compact role catalogs expose every owned choice,
 unavailable flights still preserve the shared route scaffold, and the
 structured-generation path does not accept an unclosed assignments array.
+Preference tests also verify masked/final-token likelihoods, exact replay token
+round trips, streamed joint-DPO gradient equivalence, complete reward-model
+inputs, and all three training loops, including iterative refresh.
 
 ## Development workflow
 
