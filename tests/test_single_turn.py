@@ -459,19 +459,7 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertAlmostEqual(reward, 1.0, places=6)
         self.assertEqual(
             detail["reward_backend"],
-            "reference_constraint_terminal_weighted_v10",
-        )
-        self.assertAlmostEqual(
-            detail["reward_component/budget_pass"], 0.12
-        )
-        self.assertAlmostEqual(
-            detail["reward_component/commonsense_macro"], 0.10
-        )
-        self.assertAlmostEqual(
-            detail["reward_component/hard_macro"], 0.18
-        )
-        self.assertAlmostEqual(
-            detail["reward_component/final_success"], 0.25
+            "reference_constraint_learnable_v8_budget_dense",
         )
         self.assertEqual(detail["ultimate/reference_plan_success"], 1.0)
         self.assertEqual(detail["ultimate/reference_plan_delivery"], 1.0)
@@ -754,7 +742,7 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(detail["shaping/quoted_grounded_count"], 1.0)
         self.assertGreater(detail["reward_component/recovered_semantic"], 0.0)
         self.assertLessEqual(
-            detail["reward_component/recovered_semantic"], 0.01
+            detail["reward_component/recovered_semantic"], 0.03
         )
         self.assertEqual(detail["reward_component/strict_quality"], 0.0)
 
@@ -803,7 +791,7 @@ class ReferenceRewardTests(unittest.TestCase):
         )
 
         self.assertGreater(grounded_reward, ungrounded_reward)
-        self.assertLessEqual(grounded_reward, 0.02)
+        self.assertLessEqual(grounded_reward, 0.05)
         self.assertEqual(grounded_detail["ultimate/team_action_success"], 0.0)
         self.assertEqual(ungrounded_detail["ultimate/team_action_success"], 0.0)
         self.assertGreater(
@@ -824,7 +812,7 @@ class ReferenceRewardTests(unittest.TestCase):
         valid_reward, _ = score_single_turn_response(
             valid_completions(), batch_item=fixture_item()
         )
-        self.assertAlmostEqual(dash_reward, 0.04)
+        self.assertAlmostEqual(dash_reward, 0.08)
         self.assertLess(route_reward, 0.75)
         self.assertGreater(valid_reward - route_reward, 0.30)
         self.assertEqual(route_detail["ultimate/collaboration_success"], 0.0)
@@ -882,62 +870,16 @@ class ReferenceRewardTests(unittest.TestCase):
         both_reward, both_detail = score_single_turn_response(
             both_malformed, batch_item=fixture_item()
         )
-        self.assertLessEqual(one_reward, 0.03)
-        self.assertLessEqual(both_reward, 0.02)
+        self.assertLessEqual(one_reward, 0.07)
+        self.assertLessEqual(both_reward, 0.05)
         self.assertEqual(one_detail["ultimate/team_action_success"], 0.0)
         self.assertEqual(both_detail["action_validity"], 0.0)
-        # The plan evaluator can still recover perfect plan-level outcomes
-        # from prefixed JSON. Those outcomes must remain behind the strict J
-        # gate instead of creating a malformed-output shortcut.
-        self.assertEqual(one_detail["ultimate/reference_budget_pass"], 1.0)
-        self.assertEqual(
-            one_detail["ultimate/reference_commonsense_macro"], 1.0
-        )
-        self.assertEqual(one_detail["ultimate/reference_hard_macro"], 1.0)
         self.assertLessEqual(
-            one_detail["reward_component/recovered_semantic"], 0.01
+            one_detail["reward_component/recovered_semantic"], 0.03
         )
         self.assertLessEqual(
-            both_detail["reward_component/recovered_semantic"], 0.01
+            both_detail["reward_component/recovered_semantic"], 0.03
         )
-        for detail in (one_detail, both_detail):
-            self.assertEqual(detail["reward_component/budget_pass"], 0.0)
-            self.assertEqual(
-                detail["reward_component/commonsense_macro"], 0.0
-            )
-            self.assertEqual(detail["reward_component/hard_macro"], 0.0)
-
-    def test_v10_reserves_most_reward_for_strict_terminal_outcomes(self):
-        config = TravelRewardConfig()
-        non_terminal = sum(
-            (
-                config.protocol_progress_weight,
-                config.recovered_semantic_weight,
-                config.action_validity_weight,
-                config.team_action_weight,
-                config.strict_balance_weight,
-                config.strict_quality_weight,
-                config.strict_grounding_weight,
-            )
-        )
-        terminal = sum(
-            (
-                config.budget_pass_bonus,
-                config.commonsense_macro_bonus,
-                config.hard_macro_bonus,
-                config.final_success_bonus,
-            )
-        )
-        self.assertAlmostEqual(non_terminal, 0.35)
-        self.assertAlmostEqual(terminal, 0.65)
-
-        with self.assertRaisesRegex(ValueError, "must sum to 1.0"):
-            TravelRewardConfig(budget_pass_bonus=0.13).validate()
-        with self.assertRaisesRegex(ValueError, "must be non-negative"):
-            TravelRewardConfig(
-                budget_pass_bonus=-0.01,
-                final_success_bonus=0.38,
-            ).validate()
 
     def test_strict_all_dash_agent_cannot_free_ride_on_either_role(self):
         outputs = valid_completions()
@@ -1212,9 +1154,7 @@ class LoggerTests(unittest.TestCase):
                 "turn_1/ultimate/reference_plan_delivery",
                 "turn_1/ultimate/required_plan_completion",
                 "turn_1/ultimate/reference_commonsense_micro",
-                "turn_1/ultimate/reference_commonsense_macro",
                 "turn_1/ultimate/reference_hard_micro",
-                "turn_1/ultimate/reference_hard_macro",
                 "turn_1/ultimate/reference_budget_pass",
                 "turn_1/ultimate/reference_plan_success",
                 "turn_1/ultimate/collaboration_success",
@@ -1222,7 +1162,7 @@ class LoggerTests(unittest.TestCase):
         )
         self.assertNotIn("turn_1/agent_0/parser_error/any", metrics[0])
 
-    def test_eval_logger_builds_a_wandb_sample_table(self):
+    def test_eval_logger_keeps_sample_details_without_a_wandb_table(self):
         item = fixture_item()
         outputs = valid_completions()
         logger = build_single_turn_eval_logger(
@@ -1250,38 +1190,21 @@ class LoggerTests(unittest.TestCase):
                 "turn_1/ultimate/reference_plan_delivery",
                 "turn_1/ultimate/required_plan_completion",
                 "turn_1/ultimate/reference_commonsense_micro",
-                "turn_1/ultimate/reference_commonsense_macro",
                 "turn_1/ultimate/reference_hard_micro",
-                "turn_1/ultimate/reference_hard_macro",
                 "turn_1/ultimate/reference_budget_pass",
                 "turn_1/ultimate/reference_plan_success",
                 "turn_1/ultimate/collaboration_success",
-                "turn_1/eval_samples",
             },
         )
-        table = aggregate["turn_1/eval_samples"]
-        self.assertIn("agent_0_output", table.columns)
-        self.assertIn("agent_1_output", table.columns)
-        self.assertIn("merged_plan", table.columns)
-        self.assertIn("reward", table.columns)
-        self.assertIn("protocol_progress", table.columns)
-        self.assertIn("required_cooperative_contribution", table.columns)
-        self.assertIn("plan_delivery", table.columns)
-        self.assertIn("required_plan_completion", table.columns)
-        self.assertIn("required_cost_completeness", table.columns)
-        self.assertIn("budget_constraint_soft", table.columns)
-        self.assertIn("budget_pass", table.columns)
-        self.assertIn("commonsense_macro", table.columns)
-        self.assertIn("hard_macro", table.columns)
-        self.assertEqual(len(table.data), 1)
-        self.assertEqual(table.data[0][table.columns.index("reward")], 1.0)
-        self.assertEqual(
-            table.data[0][table.columns.index("plan_delivery")], 1.0
-        )
-        self.assertEqual(
-            table.data[0][table.columns.index("required_plan_completion")],
-            1.0,
-        )
+        self.assertNotIn("turn_1/eval_samples", aggregate)
+        self.assertTrue(all(isinstance(value, float) for value in aggregate.values()))
+        # Per-sample rewards still support fixed-anchor aggregation at final
+        # evaluation, without building or uploading a W&B table.
+        sample = metrics[0]["_eval_sample"]
+        self.assertEqual(sample["agent_0_output"], outputs[0])
+        self.assertEqual(sample["agent_1_output"], outputs[1])
+        self.assertEqual(sample["reward"], 1.0)
+        self.assertEqual(sample["required_plan_completion"], 1.0)
 
     def test_eval_logger_fails_loudly_on_unknown_prompt(self):
         logger = build_single_turn_eval_logger([fixture_item()])

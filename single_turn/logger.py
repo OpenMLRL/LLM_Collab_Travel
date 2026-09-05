@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, Iterable, List, Mapping
+from typing import Any, Callable, Dict, Iterable, List
 
 import numpy as np
 
@@ -26,9 +26,7 @@ _EVAL_SCALAR_KEYS = (
     "ultimate/reference_plan_delivery",
     "ultimate/required_plan_completion",
     "ultimate/reference_commonsense_micro",
-    "ultimate/reference_commonsense_macro",
     "ultimate/reference_hard_micro",
-    "ultimate/reference_hard_macro",
     "ultimate/reference_budget_pass",
     "ultimate/reference_plan_success",
     "ultimate/collaboration_success",
@@ -161,11 +159,7 @@ def build_single_turn_eval_logger(
                 "commonsense_micro": detail[
                     "ultimate/reference_commonsense_micro"
                 ],
-                "commonsense_macro": detail[
-                    "ultimate/reference_commonsense_macro"
-                ],
                 "hard_micro": detail["ultimate/reference_hard_micro"],
-                "hard_macro": detail["ultimate/reference_hard_macro"],
                 "reference_plan_success": detail[
                     "ultimate/reference_plan_success"
                 ],
@@ -247,54 +241,4 @@ def aggregate_single_turn_metrics(
         else 0.0
     )
 
-    sample_rows = [
-        sample["_eval_sample"]
-        for sample in metrics_list
-        if isinstance(sample.get("_eval_sample"), Mapping)
-    ]
-    if sample_rows:
-        try:
-            import wandb
-        except ImportError:
-            pass
-        else:
-            columns = [
-                "panel_id",
-                "sample_id",
-                "days",
-                "query",
-                "agent_0_output",
-                "agent_1_output",
-                "merged_plan",
-                "reward",
-                "plan_score",
-                "protocol_progress",
-                "action_validity",
-                "team_action_success",
-                "required_cooperative_contribution",
-                "required_grounded_recall",
-                "grounding_precision",
-                "required_cost_completeness",
-                "budget_constraint_soft",
-                "budget_pass",
-                "route_scaffold_match",
-                "plan_delivery",
-                "required_plan_completion",
-                "commonsense_micro",
-                "commonsense_macro",
-                "hard_micro",
-                "hard_macro",
-                "reference_plan_success",
-                "collaboration_success",
-                "parser_errors",
-            ]
-            aggregated["turn_1/eval_samples"] = wandb.Table(
-                columns=columns,
-                # Scalar metrics use the complete eval subset.  Upload one
-                # representative collaboration trace per checkpoint to avoid
-                # repeatedly shipping four long prompts and generations.
-                data=[
-                    [sample_rows[0].get(column) for column in columns]
-                ],
-            )
     return aggregated

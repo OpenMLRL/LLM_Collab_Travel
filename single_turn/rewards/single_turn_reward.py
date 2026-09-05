@@ -42,25 +42,21 @@ def _geometric_quality(balance: float, quality: float) -> float:
 
 @dataclass
 class TravelRewardConfig:
-    """Weights for the terminal-weighted v10 team reward.
+    """Weights for the learnable strict-first v8 team reward.
 
-    Non-terminal progress is capped at 35% of the positive range. The other
-    65% is reserved for strict budget, commonsense, hard-constraint, and final
-    collaboration outcomes. Two small, bounded protocol/recovered-semantic
-    channels keep malformed early rollouts rankable.
+    Strict joint quality owns 91% of the positive range. Two small, bounded
+    protocol/recovered-semantic channels keep malformed early rollouts
+    rankable without allowing them to compete with valid collaboration.
     """
 
-    protocol_progress_weight: float = 0.01
-    recovered_semantic_weight: float = 0.01
-    action_validity_weight: float = 0.02
-    team_action_weight: float = 0.01
-    strict_balance_weight: float = 0.04
-    strict_quality_weight: float = 0.22
-    strict_grounding_weight: float = 0.04
-    budget_pass_bonus: float = 0.12
-    commonsense_macro_bonus: float = 0.10
-    hard_macro_bonus: float = 0.18
-    final_success_bonus: float = 0.25
+    protocol_progress_weight: float = 0.02
+    recovered_semantic_weight: float = 0.03
+    action_validity_weight: float = 0.04
+    team_action_weight: float = 0.02
+    strict_balance_weight: float = 0.14
+    strict_quality_weight: float = 0.57
+    strict_grounding_weight: float = 0.08
+    final_success_bonus: float = 0.10
 
     assignment_coverage_weight: float = 0.20
     required_grounded_weight: float = 0.25
@@ -106,9 +102,6 @@ class TravelRewardConfig:
             self.strict_balance_weight,
             self.strict_quality_weight,
             self.strict_grounding_weight,
-            self.budget_pass_bonus,
-            self.commonsense_macro_bonus,
-            self.hard_macro_bonus,
             self.final_success_bonus,
         )
         if not math.isclose(sum(positive_weights), 1.0, abs_tol=1e-9):
@@ -302,11 +295,6 @@ def score_single_turn_response(
     strict_composite_quality = _geometric_quality(
         semantic_contribution, plan_score
     )
-    budget_pass = float(detail["ultimate/reference_budget_pass"])
-    commonsense_macro = float(
-        detail["ultimate/reference_commonsense_macro"]
-    )
-    hard_macro = float(detail["ultimate/reference_hard_macro"])
     final_success = float(detail["ultimate/collaboration_success"])
     positive_components = {
         "protocol_progress": cfg.protocol_progress_weight * protocol_progress,
@@ -323,18 +311,6 @@ def score_single_turn_response(
         "strict_grounding": cfg.strict_grounding_weight
         * joint_validity
         * strict_grounding,
-        # Reference-plan terminal metrics can remain positive when recovery
-        # finds a plan inside malformed text. Gate them with strict joint
-        # validity so invalid actions cannot collect terminal bonuses.
-        "budget_pass": cfg.budget_pass_bonus
-        * joint_validity
-        * budget_pass,
-        "commonsense_macro": cfg.commonsense_macro_bonus
-        * joint_validity
-        * commonsense_macro,
-        "hard_macro": cfg.hard_macro_bonus
-        * joint_validity
-        * hard_macro,
         "final_success": cfg.final_success_bonus * final_success,
     }
     penalty_components = {
@@ -434,7 +410,7 @@ def score_single_turn_response(
             f"reward_penalty/{key}": float(value)
             for key, value in penalty_components.items()
         },
-        "reward_backend": "reference_constraint_terminal_weighted_v10",
+        "reward_backend": "reference_constraint_learnable_v8_budget_dense",
     }
     return float(reward), reward_detail
 

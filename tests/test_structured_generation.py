@@ -465,9 +465,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             "turn_1/ultimate/reference_plan_delivery": 0.5,
             "turn_1/ultimate/required_plan_completion": 0.5,
             "turn_1/ultimate/reference_commonsense_micro": 0.5,
-            "turn_1/ultimate/reference_commonsense_macro": 0.5,
             "turn_1/ultimate/reference_hard_micro": 0.5,
-            "turn_1/ultimate/reference_hard_macro": 0.5,
             "turn_1/ultimate/reference_plan_success": 0.5,
             "turn_1/ultimate/collaboration_success": 0.5,
         }
@@ -495,7 +493,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         self.assertEqual(metrics["eval/team_action_success"], 0.5)
         self.assertEqual(metrics["eval/reference_plan_delivery"], 0.5)
         self.assertEqual(metrics["eval/required_plan_completion"], 0.5)
-        self.assertEqual(metrics["eval/samples"], "sample-table")
+        self.assertNotIn("eval/samples", metrics)
         self.assertEqual(
             set(metrics),
             {
@@ -510,12 +508,9 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 "eval/reference_plan_delivery",
                 "eval/required_plan_completion",
                 "eval/reference_commonsense_micro",
-                "eval/reference_commonsense_macro",
                 "eval/reference_hard_micro",
-                "eval/reference_hard_macro",
                 "eval/reference_plan_success",
                 "eval/collaboration_success",
-                "eval/samples",
             },
         )
         fake_wandb.log.assert_called_once()
@@ -554,7 +549,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(metrics["eval/samples"], "table-2")
+        self.assertNotIn("eval/samples", metrics)
         self.assertEqual(metrics["eval/reward"], 0.05)
         self.assertEqual(metrics["eval_full/reward"], 0.8)
         self.assertEqual(metrics["eval/reference_plan_delivery"], 0.2)
@@ -574,11 +569,46 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 "eval_full/reference_plan_delivery",
                 "eval_full/required_plan_completion",
                 "eval_full/collaboration_success",
-                "eval/samples",
             },
         )
         fake_wandb.log.assert_called_once()
+        self.assertEqual(
+            fake_wandb.log.call_args.args[0],
+            {
+                "eval/reward": 0.05,
+                "eval/reference_plan_delivery": 0.2,
+                "eval/required_plan_completion": 0.2,
+                "eval/collaboration_success": 0.2,
+            },
+        )
         self.assertTrue(fake_wandb.log.call_args.kwargs["commit"])
+
+    def test_train_buffers_are_processed_without_wandb_uploads(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.wandb_initialized = True
+        trainer.env_step = 40
+        trainer.rollout_buffers = [["agent-0-buffer"], ["agent-1-buffer"]]
+        trainer._parallel_agent_mode_enabled = Mock(return_value=False)
+
+        def run_agent_tasks(process, *, agent_indices, parallel):
+            return [process(agent_idx) for agent_idx in agent_indices]
+
+        trainer._run_agent_tasks = Mock(side_effect=run_agent_tasks)
+        trainer._process_buffer = Mock(side_effect=lambda agent_idx, buffer: {
+            "log_entries": [{
+                "agent_idx": agent_idx,
+                "step": 40,
+                "metrics": {"train/reward": 0.5, "turn_1/reward_mean": 0.5},
+            }],
+        })
+        fake_wandb = SimpleNamespace(run=object(), log=Mock())
+        with patch("comlrl.trainers.reinforce.magrpo.wandb", fake_wandb):
+            trainer._drain_ready_buffers([0, 1])
+
+        self.assertEqual(trainer._process_buffer.call_count, 2)
+        trainer._process_buffer.assert_any_call(0, trainer.rollout_buffers[0])
+        trainer._process_buffer.assert_any_call(1, trainer.rollout_buffers[1])
+        fake_wandb.log.assert_not_called()
 
     def test_rotating_eval_cycles_through_held_out_pool(self):
         trainer = object.__new__(StructuredOutputMAGRPOTrainer)

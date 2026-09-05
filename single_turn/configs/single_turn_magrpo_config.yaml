@@ -71,20 +71,17 @@ travel:
   curriculum_days: [3]
 
 travel_reward:
-  # Reward v10 caps non-terminal progress at 0.35, so learning the common
-  # JSON/grounding shortcut cannot consume nearly the whole reward range.
-  # Strict endpoint bonuses own the remaining 0.65.
-  protocol_progress_weight: 0.01
-  recovered_semantic_weight: 0.01
-  action_validity_weight: 0.02
-  team_action_weight: 0.01
-  strict_balance_weight: 0.04
-  strict_quality_weight: 0.22
-  strict_grounding_weight: 0.04
-  budget_pass_bonus: 0.12
-  commonsense_macro_bonus: 0.10
-  hard_macro_bonus: 0.18
-  final_success_bonus: 0.25
+  # Reward v8 keeps the successful strict joint weights from v7 while the
+  # evaluator supplies dense cost-completeness and over-budget progress.
+  # The two 0.02/0.03 malformed-output channels remain tightly bounded.
+  protocol_progress_weight: 0.02
+  recovered_semantic_weight: 0.03
+  action_validity_weight: 0.04
+  team_action_weight: 0.02
+  strict_balance_weight: 0.14
+  strict_quality_weight: 0.57
+  strict_grounding_weight: 0.08
+  final_success_bonus: 0.10
   # These five terms sum to the unit plan-quality score.
   assignment_coverage_weight: 0.20
   required_grounded_weight: 0.25
@@ -147,7 +144,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-terminal-weighted-v10-60train
+  name: Travel-magrpo-qwen3-4b-hard-budget-v9-60train
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -156,9 +153,9 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
-  - reward-v10-terminal-weighted
+  - reward-v8-budget-dense
   - hard-aware-budget-contract
-  - fixed-skeleton
+  - fixed-skeleton-v8
   - two-stage-3day-curriculum
   - greedy-fixed-anchor
   - compact-role-catalogs

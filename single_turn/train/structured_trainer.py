@@ -198,11 +198,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "train/reference_budget_soft": "budget_constraint_soft",
             "train/reference_budget_pass": "ultimate/reference_budget_pass",
             "train/reference_commonsense_soft": "commonsense_soft",
-            "train/reference_commonsense_macro": (
-                "ultimate/reference_commonsense_macro"
-            ),
             "train/reference_hard_soft": "hard_constraint_soft",
-            "train/reference_hard_macro": "ultimate/reference_hard_macro",
             "train/required_plan_completion": (
                 "ultimate/required_plan_completion"
             ),
@@ -229,6 +225,11 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                 record[output_key] = sum(values) / len(values)
         self._travel_train_detail_groups.append(record)
         return rewards
+
+    def _should_log_train(self, step: int) -> bool:
+        """Keep Travel's W&B history focused on fixed-anchor eval curves."""
+
+        return False
 
     def _process_buffer(self, agent_idx: int, buffer: Any) -> Dict[str, Any]:
         """Attach one shared set of Travel metrics to agent 0's train log."""
@@ -405,9 +406,8 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             anchor_size = int(getattr(self.args, "eval_num_samples", len(detailed)))
             is_full_eval = len(detailed) > anchor_size
             if is_full_eval:
-                # Full-pool evaluation only needs aggregate scalars.  Keep the
-                # representative output table on the fixed anchor so terminal
-                # evaluation does not build and upload a second large table.
+                # Keep the full-pool result available to the caller, while
+                # W&B receives only the same fixed anchor as earlier evals.
                 full_rows = [
                     {
                         key: value
@@ -499,11 +499,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "reference_commonsense_micro": (
                 "turn_1/ultimate/reference_commonsense_micro"
             ),
-            "reference_commonsense_macro": (
-                "turn_1/ultimate/reference_commonsense_macro"
-            ),
             "reference_hard_micro": "turn_1/ultimate/reference_hard_micro",
-            "reference_hard_macro": "turn_1/ultimate/reference_hard_macro",
             "reference_plan_success": (
                 "turn_1/ultimate/reference_plan_success"
             ),
@@ -520,14 +516,16 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                         raw_metrics[source]
                     )
 
-        # Keep exactly one representative output table under one stable key.
-        table = raw_metrics.get("eval/turn_1/eval_samples")
-        if table is not None:
-            metrics["eval/samples"] = table
         if self.wandb_initialized and wandb.run is not None:
             # One committed write avoids W&B dropping a second write at the
-            # same explicit step and keeps the public metric surface compact.
-            wandb.log(metrics, step=self.env_step, commit=True)
+            # same explicit step. Full-pool results stay in the return value;
+            # only the fixed-anchor scalar curves are uploaded.
+            wandb_metrics = {
+                key: value for key, value in metrics.items()
+                if key.startswith("eval/")
+            }
+            if wandb_metrics:
+                wandb.log(wandb_metrics, step=self.env_step, commit=True)
         return metrics
 
     def evaluate(self, num_eval_samples: Optional[int] = None) -> Dict[str, Any]:
