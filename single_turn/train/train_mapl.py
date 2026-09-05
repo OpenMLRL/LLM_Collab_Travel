@@ -22,7 +22,7 @@ from single_turn.train.train_magrpo import (
     _load_data, _wandb_config,
 )
 
-ALGORITHMS = ("marlhf", "marlhf_iter", "madpo_iter")
+ALGORITHMS = ("madpo", "madpo_iter", "marlhf", "marlhf_iter")
 
 
 def load_config(path, seen=()):
@@ -41,9 +41,9 @@ def load_config(path, seen=()):
 
 
 def make_trainer_args(config):
-    from comlrl.trainers.preference import MADPOIterConfig, MARLHFConfig, MARLHFIterConfig
+    from comlrl.trainers.preference import MADPOConfig, MADPOIterConfig, MARLHFConfig, MARLHFIterConfig
 
-    classes = {"marlhf": MARLHFConfig, "marlhf_iter": MARLHFIterConfig, "madpo_iter": MADPOIterConfig}
+    classes = {"madpo": MADPOConfig, "madpo_iter": MADPOIterConfig, "marlhf": MARLHFConfig, "marlhf_iter": MARLHFIterConfig}
     if config.get_section("magrpo"):
         raise ValueError("Use mapl.* overrides for preference trainers, not magrpo.*.")
     algorithm = config.get("algorithm")
@@ -93,14 +93,14 @@ def budget_report(config, args, train_count):
         "preference_refreshes": iterations,
         "eval_uses": "fixed task reward, not the learned reward model",
     }
-    if config.get("algorithm") == "madpo_iter":
+    if config.get("algorithm") in {"madpo", "madpo_iter"}:
         pair_limit = args.preference_pairs_per_sample
         report["pair_counted_env_steps_upper_bound"] = (
             iterations * args.num_train_epochs * train_count * pair_limit * args.environment_steps_per_pair
-            if pair_limit is not None and args.pair_selection != "all" and not args.preference_replay_sample_size
+            if pair_limit is not None and args.pair_selection != "all" and not getattr(args, "preference_replay_sample_size", None)
             else None
         )
-        report["caveat"] = "Ties reduce pairs; replay reuses data. Pair-counted env steps are not rollout counts."
+        report["caveat"] = "Ties reduce pairs; optimization reuses preference data. Pair-counted env steps are not rollout counts."
     else:
         report["online_rl_joint_rollouts"] = iterations * args.num_train_epochs * train_count * args.num_generations
         report["caveat"] = "Preference collection and evaluation cost are additional to online RL rollouts."
@@ -144,7 +144,7 @@ def main(default_algorithm=None):
     from transformers import AutoTokenizer
     from single_turn.formatting import get_single_turn_formatters
     from single_turn.logger import aggregate_single_turn_metrics, build_single_turn_eval_logger
-    from single_turn.train.preference_trainer import TravelMADPOIterTrainer, TravelMARLHFTrainer, TravelMARLHFIterTrainer
+    from single_turn.train.preference_trainer import TravelMADPOTrainer, TravelMADPOIterTrainer, TravelMARLHFTrainer, TravelMARLHFIterTrainer
 
     seed = int(config.get("seed", 42))
     random.seed(seed)
@@ -174,7 +174,7 @@ def main(default_algorithm=None):
         wandb_config["dir"] = config.get("wandb.dir") or str(output)
         wandb_config["output_dir"] = str(output)
         wandb_config["name"] = f"{wandb_config['name']}-seed{seed}-{job}"
-    trainers = {"madpo_iter": TravelMADPOIterTrainer, "marlhf": TravelMARLHFTrainer, "marlhf_iter": TravelMARLHFIterTrainer}
+    trainers = {"madpo": TravelMADPOTrainer, "madpo_iter": TravelMADPOIterTrainer, "marlhf": TravelMARLHFTrainer, "marlhf_iter": TravelMARLHFIterTrainer}
     trainer = trainers[config.get("algorithm")](
         agent_model=model.name if names is None else None, agents=names, num_agents=2,
         tokenizer=tokenizers, model_config={"torch_dtype": model.torch_dtype,

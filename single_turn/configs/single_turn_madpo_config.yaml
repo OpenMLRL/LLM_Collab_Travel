@@ -1,0 +1,11 @@
+extends: single_turn_mapl_config.yaml
+algorithm: madpo
+mapl:
+  # One preference collection; at most 7 * 60 * 6 * 2 = 5040 pair-counted steps.
+  num_train_epochs: 7
+  pair_selection: reward_gap
+  eval_interval: 12
+output:
+  base_dir: output_single_turn_madpo
+wandb:
+  name: Travel-madpo-qwen3-4b

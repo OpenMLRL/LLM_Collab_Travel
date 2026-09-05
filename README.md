@@ -313,6 +313,11 @@ at the same environment step do not overwrite or drop each other.
 Detailed `train/*`, full-pool `eval_full/*`, and `eval/samples` uploads remain
 disabled. No W&B sample table is constructed.
 
+For all Travel trainers, `env_step` is retained in history as an x-axis, but
+defined with `hidden=True, summary="none"`: no automatic standalone plot or
+summary value is requested. Previously saved workspace panels are separate
+from this run-level setting and are not deleted by starting a new run.
+
 The terminal evaluation still evaluates all 20 held-out examples and returns
 the full-pool results to the caller. Only its first four examples contribute
 to the final W&B `eval/*` point, so it has the same denominator as earlier
@@ -371,15 +376,16 @@ W&B defaults to project `Travel` and run name
 
 ## MAPL preference algorithms (one GPU)
 
-Travel now provides three adapters over the existing CoMLRL implementations:
+Travel provides both iterative and non-iterative adapters over CoMLRL:
 
 | Entry point | Training procedure | Default online/update budget |
 | --- | --- | --- |
+| `single_turn/train/train_madpo.py` | Collect task-reward preferences once, then optimize the fixed dataset with joint DPO | At most 7 epochs × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
 | `single_turn/train/train_marlhf.py` | Rank sampled joint actions with the task reward, fit a joint reward model once, then MAGRPO | 21 epochs × 60 prompts × 4 generations = 5040 online joint rollouts |
 | `single_turn/train/train_marlhf_iter.py` | Refresh comparisons and refit the reward model before each online stage | 7 iterations × 3 epochs × 60 × 4 = 5040 online joint rollouts |
 | `single_turn/train/train_madpo_iter.py` | Iteratively compare joint actions and apply joint DPO, with λ=0.8 replay | At most 7 iterations × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
 
-All three reuse the existing role prompts, strict JSON generation, deterministic
+All four reuse the existing role prompts, strict JSON generation, deterministic
 merge, fixed task reward, 60/20 split, and four-example fixed eval anchor. Unlike
 MAGRPO's short-trip warm-up, these configurations use all 60 training rows from
 the outset. No target/annotated plan is used to generate preference labels.
@@ -396,7 +402,9 @@ number, new/total/training preference-pair counts, candidate reward distribution
 (target vs comparator), and selected/replayed preference reward distributions.
 The default `mapl.log_reward_distribution=true` enables the distributions;
 setting it to false keeps the small iteration counters without distribution
-plots. Non-iterative MARLHF has no iterative refresh loop or `iter/*` panel.
+plots. Non-iterative MADPO and MARLHF have no iterative refresh loop or `iter/*`
+panel. Iteration distributions are emitted after that iteration's preference
+collection and selection finish, not immediately when the run starts.
 Training, full-pool eval, and sample-table uploads remain disabled.
 
 Distribution plots use 16 fixed bins over the current task reward's declared
@@ -414,7 +422,7 @@ so an iteration refresh and an eval at the same env step cannot drop each
 other's logs. The reward x-axis inside a distribution plot is separate from
 either training-progress axis.
 
-Preference collection is additional compute: default MARLHF collects 1200
+Preference collection is additional compute: default MADPO and MARLHF collect 1200
 joint candidates once, while each iterative configuration collects 16,800
 across seven refreshes (20 target + 20 comparator candidates per prompt).
 Ties produce no preference, so actual pair counts and completed update steps
@@ -444,6 +452,7 @@ Configuration files support relative `extends`; common `mapl.*` overrides apply
 to the selected algorithm. Validate without loading any model weights:
 
 ```bash
+python single_turn/train/train_madpo.py --dry-run
 python single_turn/train/train_marlhf.py --dry-run
 python single_turn/train/train_marlhf_iter.py --dry-run
 python single_turn/train/train_madpo_iter.py --dry-run
@@ -458,7 +467,7 @@ TOKENIZERS_PARALLELISM=false \
 python -u single_turn/train/train_madpo_iter.py --override seed=42
 ```
 
-Replace the entrypoint with either MARLHF entrypoint for that algorithm. For a
+Replace the entrypoint with any of the four entrypoints above. For a
 minimal iterative smoke test, reduce collection as well as online updates:
 
 ```bash
@@ -474,7 +483,7 @@ python -u single_turn/train/train_madpo_iter.py --override \
   evaluation.final_num_samples=1 wandb.enabled=false output.save_final_model=false
 ```
 
-For non-iterative MARLHF omit `mapl.num_iterations`; MARLHF also supports
+For non-iterative MADPO/MARLHF omit `mapl.num_iterations`; MARLHF also supports
 `mapl.num_generations=2` for smoke runs. A tied smoke sample can produce zero
 updates; an all-tied run exits with an explicit error rather than reporting a
 successful training run. Check the final `preference_pairs` and `env_steps`.
@@ -500,7 +509,7 @@ unavailable flights still preserve the shared route scaffold, and the
 structured-generation path does not accept an unclosed assignments array.
 Preference tests also verify masked/final-token likelihoods, exact replay token
 round trips, streamed joint-DPO gradient equivalence, complete reward-model
-inputs, and all three training loops, including iterative refresh.
+inputs, and all four training loops, including iterative refresh.
 
 ## Development workflow
 

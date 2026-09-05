@@ -19,7 +19,7 @@ import torch.nn.functional as F
 import wandb
 from transformers import AutoModel, AutoTokenizer
 
-from comlrl.trainers.preference import MADPOIterTrainer, MARLHFIterTrainer, MARLHFTrainer
+from comlrl.trainers.preference import MADPOTrainer, MADPOIterTrainer, MARLHFIterTrainer, MARLHFTrainer
 from comlrl.trainers.preference.madpo import AgentPreferenceTensors, PreferencePair
 from comlrl.utils.distributed import unwrap_model
 from comlrl.utils.tokenizer_utils import ensure_pad_token
@@ -322,7 +322,8 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if not allowed:
             return
         if not getattr(self, "_travel_mapl_axes_defined", False):
-            wandb.define_metric("env_step", hidden=True)
+            # Keep the x-axis in history, without its own plot or summary card.
+            wandb.define_metric("env_step", hidden=True, summary="none")
             wandb.define_metric("eval/*", step_metric="env_step")
             if hasattr(self.args, "num_iterations"):
                 wandb.define_metric("iter/current_iteration", hidden=True)
@@ -413,6 +414,10 @@ class TravelRewardModelMixin:
                 attention_mask=encoded["attention_mask"].to(self.reward_device),
             ))
         return torch.cat(scores)
+
+
+class TravelMADPOTrainer(TravelPreferenceMixin, MADPOTrainer):
+    _train_preference_algorithm = MADPOTrainer.train
 
 
 class TravelMADPOIterTrainer(TravelPreferenceMixin, MADPOIterTrainer):

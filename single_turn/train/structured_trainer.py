@@ -585,7 +585,8 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         if not allowed:
             return
         if not getattr(self, "_travel_magrpo_axes_defined", False):
-            wandb.define_metric("env_step", hidden=True)
+            # Keep the x-axis in history, without its own plot or summary card.
+            wandb.define_metric("env_step", hidden=True, summary="none")
             wandb.define_metric("turn_1/*", step_metric="env_step")
             wandb.define_metric("eval/*", step_metric="env_step")
             self._travel_magrpo_axes_defined = True

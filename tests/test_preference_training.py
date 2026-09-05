@@ -18,13 +18,13 @@ for path in (ROOT.parent / "CoMLRL", ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from comlrl.trainers.preference import MADPOIterConfig, MARLHFConfig, MARLHFIterConfig
+from comlrl.trainers.preference import MADPOConfig, MADPOIterConfig, MARLHFConfig, MARLHFIterConfig
 from comlrl.trainers.preference.madpo import PreferencePair
 from comlrl.trainers.reinforce import MAGRPOTrainer
 from single_turn.formatting import build_agent_json_prefill
 from single_turn.rewards import make_reward
 from single_turn.train.preference_trainer import (
-    TravelJointRewardModel, TravelMADPOIterTrainer, TravelMARLHFTrainer,
+    TravelJointRewardModel, TravelMADPOTrainer, TravelMADPOIterTrainer, TravelMARLHFTrainer,
     TravelMARLHFIterTrainer, TravelPreferenceTensors,
 )
 from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer
@@ -195,7 +195,7 @@ class PreferenceAdapterTests(unittest.TestCase):
 
     def test_default_configs_keep_task_reward_and_budget_explicit(self):
         reference = load_config(ROOT / "single_turn/configs/single_turn_magrpo_config.yaml")
-        for name in ("marlhf", "marlhf_iter", "madpo_iter"):
+        for name in ("madpo", "madpo_iter", "marlhf", "marlhf_iter"):
             config = load_config(ROOT / f"single_turn/configs/single_turn_{name}_config.yaml")
             args = make_trainer_args(config)
             self.assertEqual(config.get_section("travel_reward"), reference.get_section("travel_reward"))
@@ -256,6 +256,7 @@ class PreferenceLoggingTests(unittest.TestCase):
             self.assertIn("iter/reward_distribution/iteration_0001/line_plot", metrics)
             self.assertIn("iter/selected_reward_distribution/iteration_0001/bar_plot", metrics)
             self.assertEqual(fake.log.call_args_list[2].args[0], {"env_step": 0, "eval/reward": .5})
+            fake.define_metric.assert_any_call("env_step", hidden=True, summary="none")
             fake.define_metric.assert_any_call("eval/*", step_metric="env_step")
             fake.define_metric.assert_any_call("iter/*", step_metric="iter/current_iteration")
             self.assertEqual(fake.define_metric.call_count, 4)
@@ -297,12 +298,12 @@ class PreferenceLoopTests(unittest.TestCase):
                        eval_interval=0, eval_num_samples=1, preference_num_candidates=2,
                        preference_pairs_per_sample=1, max_new_tokens=1024,
                        train_batch_size=1, rollout_buffer_size=1, advantage_normalization=False)
-        if cls != TravelMARLHFTrainer:
+        if cls in (TravelMADPOIterTrainer, TravelMARLHFIterTrainer):
             options.update(num_iterations=2, comparator_policy="current_copy", comparator_devices=["cpu", "cpu"],
                            preference_replay_dir=str(Path(directory) / "preference_replay"),
                            log_reward_distribution=True,
                            preference_replay_mode="lambda_decay", preference_replay_lambda=.8)
-        if cls != TravelMADPOIterTrainer:
+        if cls in (TravelMARLHFTrainer, TravelMARLHFIterTrainer):
             options.update(num_generations=2, reward_model_device="cpu", reward_num_train_epochs=1)
         trainer = cls(agents=[GPT2LMHeadModel(tiny_config()), GPT2LMHeadModel(tiny_config())],
                       num_agents=2, tokenizer=_TinyGenerationTokenizer(),
@@ -364,9 +365,10 @@ class PreferenceLoopTests(unittest.TestCase):
             return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
         self.reward_tokenizer = tokenize
 
-    def test_all_three_real_loops_with_tiny_actors(self):
+    def test_all_four_real_loops_with_tiny_actors(self):
         torch.set_num_threads(1)
-        for cls, config_cls in ((TravelMADPOIterTrainer, MADPOIterConfig),
+        for cls, config_cls in ((TravelMADPOTrainer, MADPOConfig),
+                                (TravelMADPOIterTrainer, MADPOIterConfig),
                                 (TravelMARLHFTrainer, MARLHFConfig),
                                 (TravelMARLHFIterTrainer, MARLHFIterConfig)):
             with self.subTest(algorithm=cls.__name__), tempfile.TemporaryDirectory() as directory:
@@ -378,11 +380,11 @@ class PreferenceLoopTests(unittest.TestCase):
                 self.assertGreater(trainer.preference_pairs_generated, 0)
                 self.assertGreater(trainer.env_step, 0)
                 self.assertFalse(trainer._should_log_train(trainer.env_step))
-                if cls != TravelMARLHFTrainer:
+                if cls in (TravelMADPOIterTrainer, TravelMARLHFIterTrainer):
                     self.assertEqual(len(list((Path(directory) / "reward_distributions").glob("iteration_*.json"))), 2)
                 for idx, actor in enumerate(trainer.agents):
                     self.assertTrue(any(not torch.equal(value, before[idx][key]) for key, value in actor.state_dict().items()))
-                if cls != TravelMADPOIterTrainer:
+                if cls in (TravelMARLHFTrainer, TravelMARLHFIterTrainer):
                     # Even when the learned RM is active, benchmark eval must
                     # always route through the domain reward, then restore flags.
                     trainer._reward_model_active = True

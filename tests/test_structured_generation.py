@@ -675,7 +675,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             "env_step", "turn_1/reward_mean",
         })
         self.assertEqual(fake_wandb.define_metric.call_count, 3)
-        fake_wandb.define_metric.assert_any_call("env_step", hidden=True)
+        fake_wandb.define_metric.assert_any_call("env_step", hidden=True, summary="none")
         fake_wandb.define_metric.assert_any_call("turn_1/*", step_metric="env_step")
         fake_wandb.define_metric.assert_any_call("eval/*", step_metric="env_step")
 
