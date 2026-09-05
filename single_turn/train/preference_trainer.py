@@ -158,6 +158,60 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             if callable(drain):
                 drain()
 
+    def _load_comparator_agents(self):
+        # Structured Travel actions and replay masks use the actors' token IDs.
+        # Reject an incompatible external vocabulary before loading its weights.
+        source = self.args.comparator_model_name
+        verified = getattr(self, "_travel_verified_comparator_tokenizers", set())
+        if source not in verified:
+            comparator_tokenizer = AutoTokenizer.from_pretrained(source)
+            vocabulary = comparator_tokenizer.get_vocab()
+            if any(tokenizer.get_vocab() != vocabulary for tokenizer in self.tokenizers):
+                raise ValueError(
+                    "Travel comparator and actors must have identical token-to-ID vocabularies "
+                    "to preserve constrained actions and preference token masks."
+                )
+            self._travel_verified_comparator_tokenizers = verified | {source}
+        devices = self._resolve_comparator_devices()
+        if len(set(devices)) == 1:
+            # With parallel_training=none the two role calls are sequential.
+            # A frozen external checkpoint has identical weights for both roles;
+            # sharing them saves VRAM without sharing prompts or sampled actions.
+            frozen = self._load_single_frozen_policy_agent(source, 0)
+            return [frozen] * self.num_agents
+        return super()._load_comparator_agents()
+
+    def _generate_history_policy_outputs_for_item(
+        self, batch_item, *, iteration_idx, num_candidates, **kwargs,
+    ):
+        checkpoint = self._history_policy_checkpoint_path(iteration_idx)
+        key = (int(iteration_idx), checkpoint)
+        if getattr(self, "_travel_history_comparator_key", None) != key:
+            self._clear_travel_history_comparator()
+            self._travel_history_comparator_agents = self._load_policy_checkpoint_agents(checkpoint)
+            self._travel_history_comparator_key = key
+        # Load once per collection phase, not twice per question. Both distinct
+        # role checkpoints and CoMLRL's history-k resolution are preserved.
+        return self._generate_policy_outputs_for_item(
+            self._travel_history_comparator_agents, batch_item,
+            num_candidates=num_candidates, use_comparator_rng=True, **kwargs,
+        )
+
+    def _clear_travel_history_comparator(self):
+        agents = getattr(self, "_travel_history_comparator_agents", None)
+        self._travel_history_comparator_agents = None
+        self._travel_history_comparator_key = None
+        if agents is not None:
+            self._clear_transient_comparator_agents(agents)
+
+    def _clear_iteration_current_copy_comparator(self):
+        # Both iterative trainers call this in their collection-phase finally
+        # block, including on errors, before fitting the RM or updating actors.
+        try:
+            super()._clear_iteration_current_copy_comparator()
+        finally:
+            self._clear_travel_history_comparator()
+
     @staticmethod
     def _preference_pair_to_record(pair):
         record = MADPOIterTrainer._preference_pair_to_record(pair)

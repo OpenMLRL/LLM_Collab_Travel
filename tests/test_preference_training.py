@@ -206,11 +206,101 @@ class PreferenceAdapterTests(unittest.TestCase):
             self.assertEqual(args.preference_pairs_per_sample, 6)
             if name.endswith("_iter"):
                 self.assertTrue(args.log_reward_distribution)
+            if name == "marlhf_iter":
+                self.assertEqual(args.num_iterations, 6)
+                self.assertEqual(args.num_train_epochs, 3)
+                self.assertEqual(args.preference_replay_lambda, .8)
             report = budget_report(config, args, 60)
-            self.assertEqual(report.get("online_rl_joint_rollouts", report.get("pair_counted_env_steps_upper_bound")), 5040)
+            expected_budget = 4320 if name == "marlhf_iter" else 5040
+            self.assertEqual(report.get("online_rl_joint_rollouts", report.get("pair_counted_env_steps_upper_bound")), expected_budget)
             config.update({"mapl": {"parallel_training": "mp"}})
             with self.assertRaisesRegex(ValueError, "parallel_training"):
                 make_trainer_args(config)
+
+
+class ComparatorAdapterTests(unittest.TestCase):
+    def test_local_comparator_configs_keep_lambda_and_actor_devices(self):
+        for policy, extra in (
+            ("current_copy", {}),
+            ("history", {"comparator_history_k": 1}),
+            ("model", {"comparator_model_name": "Qwen/Qwen3-8B"}),
+        ):
+            config = load_config(ROOT / "single_turn/configs/single_turn_marlhf_iter_config.yaml")
+            config.update({"mapl": {"comparator_policy": policy,
+                                    "comparator_devices": ["cuda:1", "cuda:1"],
+                                    "reward_model_device": "cuda:1", **extra}})
+            args = make_trainer_args(config)
+            self.assertEqual(args.preference_replay_mode, "lambda_decay")
+            self.assertEqual(args.preference_replay_lambda, .8)
+            self.assertEqual(args.agent_devices, ["cuda:0", "cuda:0"])
+            self.assertEqual(args.comparator_devices, ["cuda:1", "cuda:1"])
+            self.assertEqual(args.reward_model_device, "cuda:1")
+            config.update({"mapl": {"comparator_generation_mode": "centralized"}})
+            with self.assertRaisesRegex(ValueError, "decentralized"):
+                make_trainer_args(config)
+
+    def test_external_same_device_roles_share_frozen_weights_only(self):
+        trainer = bare_trainer()
+        trainer.args.comparator_model_name = "Qwen/Qwen3-8B"
+        tokenizer = SimpleNamespace(get_vocab=lambda: {"a": 0, "b": 1})
+        trainer.tokenizers = [tokenizer, tokenizer]
+        trainer._resolve_comparator_devices = Mock(return_value=[torch.device("cpu")] * 2)
+        frozen = GPT2LMHeadModel(tiny_config()).eval()
+        frozen.requires_grad_(False)
+        trainer._load_single_frozen_policy_agent = Mock(return_value=frozen)
+        with patch("single_turn.train.preference_trainer.AutoTokenizer.from_pretrained", return_value=tokenizer) as load:
+            comparators = trainer._load_comparator_agents()
+            trainer._load_comparator_agents()
+        self.assertIs(comparators[0], comparators[1])
+        self.assertIsNot(comparators[0], trainer.agents[0])
+        self.assertTrue(all(not p.requires_grad for p in comparators[0].parameters()))
+        load.assert_called_once_with("Qwen/Qwen3-8B")
+        self.assertEqual(trainer._load_single_frozen_policy_agent.call_count, 2)
+
+    def test_incompatible_comparator_token_ids_rejected_before_weights(self):
+        trainer = bare_trainer()
+        trainer.args.comparator_model_name = "incompatible"
+        trainer.tokenizers = [SimpleNamespace(get_vocab=lambda: {"a": 0})] * 2
+        trainer._load_single_frozen_policy_agent = Mock()
+        external = SimpleNamespace(get_vocab=lambda: {"a": 1})
+        with patch("single_turn.train.preference_trainer.AutoTokenizer.from_pretrained", return_value=external):
+            with self.assertRaisesRegex(ValueError, "token-to-ID"):
+                trainer._load_comparator_agents()
+        trainer._load_single_frozen_policy_agent.assert_not_called()
+
+    def test_history_reuses_checkpoint_within_collection_and_clears_afterward(self):
+        trainer = bare_trainer()
+        history = [object(), object()]
+        trainer._history_policy_checkpoint_path = Mock(return_value="initial")
+        trainer._load_policy_checkpoint_agents = Mock(return_value=history)
+        trainer._generate_policy_outputs_for_item = Mock(return_value="outputs")
+        trainer._clear_transient_comparator_agents = Mock()
+        for item in ({"id": 1}, {"id": 2}):
+            self.assertEqual(trainer._generate_history_policy_outputs_for_item(
+                item, iteration_idx=0, num_candidates=20), "outputs")
+        trainer._load_policy_checkpoint_agents.assert_called_once_with("initial")
+        self.assertEqual(trainer._generate_policy_outputs_for_item.call_count, 2)
+        for call in trainer._generate_policy_outputs_for_item.call_args_list:
+            self.assertIs(call.args[0], history)
+            self.assertTrue(call.kwargs["use_comparator_rng"])
+            self.assertEqual(call.kwargs["num_candidates"], 20)
+        trainer._clear_iteration_current_copy_comparator()
+        trainer._clear_transient_comparator_agents.assert_called_once_with(history)
+        self.assertIsNone(trainer._travel_history_comparator_agents)
+        trainer._generate_history_policy_outputs_for_item({}, iteration_idx=1, num_candidates=20)
+        self.assertEqual(trainer._load_policy_checkpoint_agents.call_count, 2)
+
+    def test_history_key_change_releases_previous_checkpoint(self):
+        trainer = bare_trainer()
+        first, second = [object(), object()], [object(), object()]
+        trainer._history_policy_checkpoint_path = Mock(side_effect=["initial", "iteration_0000"])
+        trainer._load_policy_checkpoint_agents = Mock(side_effect=[first, second])
+        trainer._generate_policy_outputs_for_item = Mock()
+        trainer._clear_transient_comparator_agents = Mock()
+        trainer._generate_history_policy_outputs_for_item({}, iteration_idx=0, num_candidates=20)
+        trainer._generate_history_policy_outputs_for_item({}, iteration_idx=1, num_candidates=20)
+        trainer._clear_transient_comparator_agents.assert_called_once_with(first)
+        self.assertIs(trainer._travel_history_comparator_agents, second)
 
 
 class PreferenceLoggingTests(unittest.TestCase):

@@ -1,8 +1,8 @@
 extends: single_turn_marlhf_config.yaml
 algorithm: marlhf_iter
 mapl:
-  # 7 * 3 * 60 * 4 = 5040 online rollouts; refresh cost is additional.
-  num_iterations: 7
+  # 6 * 3 * 60 * 4 = 4320 online rollouts; refresh cost is additional.
+  num_iterations: 6
   num_train_epochs: 3
   pair_selection: comparator_reward
   comparator_policy: current_copy

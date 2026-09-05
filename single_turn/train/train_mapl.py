@@ -1,4 +1,4 @@
-"""Single-GPU Travel entrypoints for CoMLRL's MAPL preference algorithms."""
+"""Memory-bounded Travel entrypoints for CoMLRL's MAPL preference algorithms."""
 
 from __future__ import annotations
 
@@ -66,8 +66,10 @@ def make_trainer_args(config):
         raise ValueError("Sequential Travel MAPL requires all actors on the same device.")
     if getattr(args, "rl_algorithm", "magrpo") != "magrpo":
         raise ValueError("This Travel MARLHF adapter currently supports the MAGRPO backend only.")
-    if getattr(args, "comparator_policy", "current") not in {"current", "current_copy"}:
-        raise ValueError("Travel MAPL currently supports current/current_copy comparators only.")
+    if getattr(args, "comparator_policy", "current") not in {"current", "current_copy", "history", "model"}:
+        raise ValueError("Travel MAPL supports local current/current_copy/history/model comparators only.")
+    if getattr(args, "comparator_policy", None) == "model" and args.comparator_agents is not None:
+        raise ValueError("Travel model comparators use comparator_model_name, not comparator_agents.")
     if getattr(args, "comparator_generation_mode", "decentralized") != "decentralized":
         raise ValueError("Travel MAPL requires a decentralized comparator.")
     if getattr(args, "preference_scoring_reward", "task") != "task":

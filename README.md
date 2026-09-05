@@ -374,7 +374,7 @@ python -u single_turn/train/train_magrpo.py \
 W&B defaults to project `Travel` and run name
 `Travel-magrpo-qwen3-4b-hard-budget-60train`.
 
-## MAPL preference algorithms (one GPU)
+## MAPL preference algorithms (one GPU by default)
 
 Travel provides both iterative and non-iterative adapters over CoMLRL:
 
@@ -382,7 +382,7 @@ Travel provides both iterative and non-iterative adapters over CoMLRL:
 | --- | --- | --- |
 | `single_turn/train/train_madpo.py` | Collect task-reward preferences once, then optimize the fixed dataset with joint DPO | At most 7 epochs × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
 | `single_turn/train/train_marlhf.py` | Rank sampled joint actions with the task reward, fit a joint reward model once, then MAGRPO | 21 epochs × 60 prompts × 4 generations = 5040 online joint rollouts |
-| `single_turn/train/train_marlhf_iter.py` | Refresh comparisons and refit the reward model before each online stage | 7 iterations × 3 epochs × 60 × 4 = 5040 online joint rollouts |
+| `single_turn/train/train_marlhf_iter.py` | Refresh comparisons and refit the reward model before each online stage | 6 iterations × 3 epochs × 60 × 4 = 4320 online joint rollouts |
 | `single_turn/train/train_madpo_iter.py` | Iteratively compare joint actions and apply joint DPO, with λ=0.8 replay | At most 7 iterations × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
 
 All four reuse the existing role prompts, strict JSON generation, deterministic
@@ -392,6 +392,26 @@ the outset. No target/annotated plan is used to generate preference labels.
 The iterative comparator is `current_copy`: the same pre-update actor weights
 with an independent random-number stream, not a separately trained critic. On
 the same device CoMLRL reuses those weights instead of cloning two more actors.
+
+Local decentralized comparator ablations also support `comparator_policy=history`
+with `comparator_history_k`, and `comparator_policy=model` with a frozen
+`comparator_model_name`. External models must have the same token-to-ID
+vocabulary as the actors, because Travel preserves constrained action tokens
+and masks in preference replay. Centralized and API comparators are not enabled.
+The history checkpoint is cached for one preference-collection phase and released
+before reward-model fitting. Identical frozen model weights on one comparator
+device are shared between the two sequential role calls; prompts and sampled
+actions remain separate. This does not change CoMLRL's comparison or replay rules.
+In particular, `history1` keeps CoMLRL/BFCL's definition: the previous iteration's
+ending checkpoint, normally the same weights as the next iteration's starting
+current actor. It is not silently reinterpreted as an extra round of staleness.
+
+For two-GPU MARLHF deployments, actors can stay together on `cuda:0` while
+`mapl.comparator_devices` and `mapl.reward_model_device` use `cuda:1`.
+Comparator collection and reward-model fitting occur in separate phases, so
+their weights do not have to coexist. Allocation scripts must expose both GPUs;
+merely requesting an extra GPU does not redistribute models. Device placement
+does not change the replay lambda, reward, candidate count, or training budget.
 
 MARLHF's learned training reward is **unbounded**; its scale is not the task
 reward scale. Evaluation always bypasses the learned model and uses the fixed
@@ -423,8 +443,10 @@ other's logs. The reward x-axis inside a distribution plot is separate from
 either training-progress axis.
 
 Preference collection is additional compute: default MADPO and MARLHF collect 1200
-joint candidates once, while each iterative configuration collects 16,800
-across seven refreshes (20 target + 20 comparator candidates per prompt).
+joint candidates once. MADPO-Iter collects 16,800 across seven refreshes;
+MARLHF-Iter collects 14,400 across six refreshes (20 target + 20 comparator
+candidates per prompt). MARLHF-Iter now defaults to six iterations; the other
+algorithms' budgets are unchanged.
 Ties produce no preference, so actual pair counts and completed update steps
 can be lower. MADPO's pair-counted steps include replay and are not fresh
 rollouts. These settings approximate the old plotted step budget, **not equal
