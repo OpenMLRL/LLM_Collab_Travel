@@ -304,10 +304,14 @@ For paper-style reporting, use `initial / final / delta` columns. The micro and
 dense metrics show incremental learning even when the all-or-nothing final
 success rate remains zero early in training.
 
-MAGRPO uploads only the fixed-anchor `eval/*` scalar curves above. Training
-metrics (`train/*` and stock `turn_1/*` aliases), full-pool `eval_full/*`
-metrics, and the `eval/samples` table are not uploaded. No W&B sample table is
-constructed.
+MAGRPO uploads the fixed-anchor `eval/*` curves above and the stock `turn_1/*`
+scalars (joint reward, expected return, and reference-KL diagnostics when
+available). Turn metrics respect `magrpo.logging_steps` and are recorded once
+per joint step, not once per agent. Both panels use `env_step` as their x-axis;
+W&B's internal history step advances independently so training and evaluation
+at the same environment step do not overwrite or drop each other.
+Detailed `train/*`, full-pool `eval_full/*`, and `eval/samples` uploads remain
+disabled. No W&B sample table is constructed.
 
 The terminal evaluation still evaluates all 20 held-out examples and returns
 the full-pool results to the caller. Only its first four examples contribute

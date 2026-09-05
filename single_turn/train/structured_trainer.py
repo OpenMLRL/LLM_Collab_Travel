@@ -227,9 +227,50 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         return rewards
 
     def _should_log_train(self, step: int) -> bool:
-        """Keep Travel's W&B history focused on fixed-anchor eval curves."""
+        """Disable the stock unfiltered, explicit-history-step logger.
+
+        MAGRPO's filtered turn metrics are uploaded below. Preference trainers
+        retain their separate iteration logger without legacy train writes.
+        """
 
         return False
+
+    def _drain_ready_buffers(self, ready_agents: List[int]) -> None:
+        """Keep stock buffer updates, but upload only MAGRPO turn metrics."""
+
+        if not getattr(self, "_travel_training_active", False):
+            # MAPL owns its training loop and its iteration-level logging.
+            return super()._drain_ready_buffers(ready_agents)
+        if not ready_agents:
+            return
+        unique_ready = sorted({int(idx) for idx in ready_agents})
+
+        def _process(agent_idx: int) -> Dict[str, Any]:
+            return self._process_buffer(agent_idx, self.rollout_buffers[agent_idx])
+
+        results = self._run_agent_tasks(
+            _process,
+            agent_indices=unique_ready,
+            parallel=self._parallel_agent_mode_enabled(),
+        )
+        if not (self.wandb_initialized and wandb.run is not None):
+            return
+
+        entries = [entry for result in results for entry in result.get("log_entries", [])]
+        entries.sort(key=lambda entry: (int(entry["step"]), int(entry["agent_idx"])))
+        by_step: Dict[int, Dict[str, Any]] = {}
+        for entry in entries:
+            metrics = by_step.setdefault(int(entry["step"]), {})
+            for key, value in (entry.get("metrics") or {}).items():
+                if key.startswith("turn_1/") and isinstance(value, Real):
+                    # Joint rewards are duplicated across actors. Keep one
+                    # point, preferring agent 0 when both actors are ready.
+                    metrics.setdefault(key, value)
+        for step, metrics in by_step.items():
+            if not metrics or step <= self._last_train_log_step:
+                continue
+            if MAGRPOTrainer._should_log_train(self, step):
+                self._log_wandb_magrpo_metrics(metrics, env_step=step)
 
     def _process_buffer(self, agent_idx: int, buffer: Any) -> Dict[str, Any]:
         """Attach one shared set of Travel metrics to agent 0's train log."""
@@ -529,8 +570,28 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         return metrics
 
     def _log_wandb_eval_metrics(self, metrics: Dict[str, Any]) -> None:
-        """Keep MAGRPO's existing logging; preference trainers can supply axes."""
-        wandb.log(metrics, step=self.env_step, commit=True)
+        """Log fixed-anchor evaluation against MAGRPO's environment steps."""
+        self._log_wandb_magrpo_metrics(metrics, env_step=self.env_step)
+
+    def _log_wandb_magrpo_metrics(
+        self, metrics: Dict[str, Any], *, env_step: int
+    ) -> None:
+        """Allow turn/eval scalars without explicit W&B history-step collisions."""
+        allowed = {
+            key: value for key, value in metrics.items()
+            if key.startswith(("turn_1/", "eval/")) and isinstance(value, Real)
+            and key != "eval/samples"
+        }
+        if not allowed:
+            return
+        if not getattr(self, "_travel_magrpo_axes_defined", False):
+            wandb.define_metric("env_step", hidden=True)
+            wandb.define_metric("turn_1/*", step_metric="env_step")
+            wandb.define_metric("eval/*", step_metric="env_step")
+            self._travel_magrpo_axes_defined = True
+        # A buffer update and eval can share env_step. Let W&B increment its
+        # internal history step so neither committed row drops the other.
+        wandb.log({"env_step": int(env_step), **allowed}, commit=True)
 
     def evaluate(self, num_eval_samples: Optional[int] = None) -> Dict[str, Any]:
         """Evaluate a stable held-out shard while leaving stock MAGRPO untouched."""

@@ -476,6 +476,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         fake_wandb = SimpleNamespace(
             run=object(),
             log=Mock(),
+            define_metric=Mock(),
         )
 
         with patch(
@@ -514,8 +515,8 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             },
         )
         fake_wandb.log.assert_called_once()
-        self.assertEqual(fake_wandb.log.call_args.args[0], metrics)
-        self.assertEqual(fake_wandb.log.call_args.kwargs["step"], 240)
+        self.assertEqual(fake_wandb.log.call_args.args[0], {"env_step": 240, **metrics})
+        self.assertNotIn("step", fake_wandb.log.call_args.kwargs)
         self.assertTrue(fake_wandb.log.call_args.kwargs["commit"])
 
     def test_final_eval_separates_full_pool_from_anchor_curve(self):
@@ -533,7 +534,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         trainer.args = SimpleNamespace(num_turns=1, eval_num_samples=2)
         trainer.wandb_initialized = True
         trainer.env_step = 5040
-        fake_wandb = SimpleNamespace(run=object(), log=Mock())
+        fake_wandb = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
 
         with patch(
             "single_turn.train.structured_trainer.wandb", fake_wandb
@@ -575,6 +576,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         self.assertEqual(
             fake_wandb.log.call_args.args[0],
             {
+                "env_step": 5040,
                 "eval/reward": 0.05,
                 "eval/reference_plan_delivery": 0.2,
                 "eval/required_plan_completion": 0.2,
@@ -609,6 +611,73 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         trainer._process_buffer.assert_any_call(0, trainer.rollout_buffers[0])
         trainer._process_buffer.assert_any_call(1, trainer.rollout_buffers[1])
         fake_wandb.log.assert_not_called()
+
+    def test_magrpo_buffers_log_turn_metrics_only_once_per_joint_step(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer._travel_training_active = True
+        trainer.args = SimpleNamespace(logging_steps=20)
+        trainer._last_train_log_step = -1
+        trainer.wandb_initialized = True
+        trainer.env_step = 40
+        trainer.rollout_buffers = [["a0"], ["a1"]]
+        trainer._parallel_agent_mode_enabled = Mock(return_value=False)
+        trainer._run_agent_tasks = Mock(side_effect=lambda process, agent_indices, parallel: [
+            process(idx) for idx in agent_indices
+        ])
+        trainer._process_buffer = Mock(side_effect=lambda agent_idx, buffer: {
+            "log_entries": [{
+                "agent_idx": agent_idx,
+                "step": trainer.env_step,
+                "metrics": {
+                    "train/reward": 0.5, "eval_full/reward": 0.5,
+                    "eval/samples": "table", "turn_1/reward_mean": 0.5,
+                    "turn_1/expected_return": 0.5,
+                },
+            }],
+        })
+        fake_wandb = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
+        with patch("single_turn.train.structured_trainer.wandb", fake_wandb):
+            trainer._drain_ready_buffers([1, 0, 1])
+            self.assertEqual(trainer._process_buffer.call_count, 2)
+            fake_wandb.log.assert_called_once_with({
+                "env_step": 40, "turn_1/reward_mean": 0.5,
+                "turn_1/expected_return": 0.5,
+            }, commit=True)
+            # Same step and sub-interval updates still train, but do not log.
+            for step in (40, 44, 60):
+                trainer.env_step = step
+                trainer._drain_ready_buffers([0, 1])
+            self.assertEqual(trainer._process_buffer.call_count, 8)
+            self.assertEqual(fake_wandb.log.call_count, 2)
+            self.assertEqual(fake_wandb.log.call_args.args[0]["env_step"], 60)
+            trainer.wandb_initialized = False
+            trainer.env_step = 80
+            trainer._drain_ready_buffers([0, 1])
+            self.assertEqual(trainer._process_buffer.call_count, 10)
+            self.assertEqual(fake_wandb.log.call_count, 2)
+
+    def test_magrpo_turn_and_eval_can_log_at_the_same_env_step(self):
+        trainer = object.__new__(StructuredOutputMAGRPOTrainer)
+        trainer.env_step = 120
+        fake_wandb = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
+        with patch("single_turn.train.structured_trainer.wandb", fake_wandb):
+            trainer._log_wandb_magrpo_metrics({
+                "turn_1/reward_mean": 0.6, "train/reward": 0.6,
+                "eval_full/reward": 0.7, "eval/samples": 1,
+            }, env_step=120)
+            trainer._log_wandb_eval_metrics({"eval/reward": 0.7})
+        self.assertEqual(fake_wandb.log.call_count, 2)
+        for call in fake_wandb.log.call_args_list:
+            self.assertEqual(call.args[0]["env_step"], 120)
+            self.assertNotIn("step", call.kwargs)
+            self.assertTrue(call.kwargs["commit"])
+        self.assertEqual(set(fake_wandb.log.call_args_list[0].args[0]), {
+            "env_step", "turn_1/reward_mean",
+        })
+        self.assertEqual(fake_wandb.define_metric.call_count, 3)
+        fake_wandb.define_metric.assert_any_call("env_step", hidden=True)
+        fake_wandb.define_metric.assert_any_call("turn_1/*", step_metric="env_step")
+        fake_wandb.define_metric.assert_any_call("eval/*", step_metric="env_step")
 
     def test_rotating_eval_cycles_through_held_out_pool(self):
         trainer = object.__new__(StructuredOutputMAGRPOTrainer)
