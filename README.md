@@ -431,14 +431,20 @@ rollouts. These settings approximate the old plotted step budget, **not equal
 total compute**. The dry-run and final console report distinguish these counts.
 
 The defaults put both Qwen3-4B-Instruct-2507 actors on `cuda:0`, use SDPA and
-gradient checkpointing, and generate candidates one at a time. During actor
+gradient checkpointing, and generate up to 20 candidates for the same prompt
+per call (`travel.preference_generation_batch_size=20`). This changes sampling
+batching, not the candidate count or preference-pair budget. Override it with a
+smaller value when GPU memory is limited. During actor
 updates, the inactive actor and its optimizer states move to CPU. During reward
 model fitting both actors move to CPU; the reward decoder has a scalar head
 without LM vocabulary logits. After fitting, the reward optimizer is released
 and the frozen reward model stays available for online scoring. Allow ample host
 RAM for offloading (requesting 128 GB is a reasonable starting point).
-This is designed for one B200 but has **not yet been profiled on a B200**;
-host transfer time and long-context activations still matter.
+A one-B200 preference-sampling benchmark with both 4B actors resident reduced a
+long-prompt case from 361 seconds at batch 1 to 62 seconds at batch 20, with a
+48.6 GiB whole-GPU sampled memory peak. This measures initial-model sampling,
+not backward passes or later-iteration memory peaks; host transfer time and
+long-context activations still matter.
 
 Travel-specific preference records store the exact generated continuation IDs
 and value-token masks, including in replay. The assistant prefill is not

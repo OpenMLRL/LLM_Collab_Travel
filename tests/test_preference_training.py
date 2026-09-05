@@ -201,6 +201,9 @@ class PreferenceAdapterTests(unittest.TestCase):
             self.assertEqual(config.get_section("travel_reward"), reference.get_section("travel_reward"))
             self.assertEqual(config.get_section("dataset"), reference.get_section("dataset"))
             self.assertEqual(args.agent_devices, ["cuda:0", "cuda:0"])
+            self.assertEqual(config.get("travel.preference_generation_batch_size"), 20)
+            self.assertEqual(args.preference_num_candidates, 20)
+            self.assertEqual(args.preference_pairs_per_sample, 6)
             if name.endswith("_iter"):
                 self.assertTrue(args.log_reward_distribution)
             report = budget_report(config, args, 60)
@@ -313,6 +316,17 @@ class PreferenceLoopTests(unittest.TestCase):
         trainer.verbose = False
         return trainer
 
+    def test_default_batch_generates_twenty_candidates_in_one_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = self.make_trainer(TravelMADPOIterTrainer, MADPOIterConfig, directory)
+            self.assertEqual(trainer.preference_generation_batch_size, 20)
+            with patch.object(StructuredOutputMAGRPOTrainer, "_generate_completions", return_value={}) as generate:
+                trainer._generate_completions(
+                    trainer.agents[0], [fixture_item()], num_return_sequences=20,
+                )
+            generate.assert_called_once()
+            self.assertEqual(generate.call_args.kwargs["num_return_sequences"], 20)
+
     def test_real_structured_generation_produces_cacheable_masks(self):
         torch.set_num_threads(1)
         with tempfile.TemporaryDirectory() as directory:
@@ -338,20 +352,23 @@ class PreferenceLoopTests(unittest.TestCase):
         # Exercise actual CoMLRL candidate pairing/replay/training with the task
         # rewards and real tiny actor gradients, without a remote model download.
         idx = getattr(agent, "test_candidate_index", 0)
-        agent.test_candidate_index = idx + 1
-        # Vary comparator vs target and candidates; both roles see same cadence.
-        good = (idx % 4) in (0, 3)
-        full = (valid_completions() if good else all_dash_completions())[agent_idx]
-        prefix = build_agent_json_prefill(agent_idx, 3)
-        assert full.startswith(prefix)
-        ids = torch.tensor([ord(char) for char in full[len(prefix):]])
         n = num_return_sequences
+        agent.test_candidate_index = idx + n
+        # Vary per candidate, not per call, so the fixture is batch-size independent.
+        # Both roles see the same target/comparator cadence.
+        fulls = [
+            (valid_completions() if (idx + offset) % 4 in (0, 3) else all_dash_completions())[agent_idx]
+            for offset in range(n)
+        ]
+        prefix = build_agent_json_prefill(agent_idx, 3)
+        assert all(full.startswith(prefix) for full in fulls)
+        ids = [torch.tensor([ord(char) for char in full[len(prefix):]]) for full in fulls]
         return {"prompts": [f"role{agent_idx}" + prefix], "prompt_input_ids": torch.tensor([[2, 3]]),
                 "prompt_attention_mask": torch.ones(1, 2), "batch_items": batch_items,
-                "completions": [[full] * n], "completion_input_ids": [[ids.clone() for _ in range(n)]],
-                "completion_attention_mask": [[torch.ones_like(ids) for _ in range(n)]],
-                "completion_loss_mask": [[torch.ones_like(ids, dtype=torch.bool) for _ in range(n)]],
-                "response_lens": [len(ids)] * n, "reference_kls": [0.] * n}
+                "completions": [fulls], "completion_input_ids": [ids],
+                "completion_attention_mask": [[torch.ones_like(tokens) for tokens in ids]],
+                "completion_loss_mask": [[torch.ones_like(tokens, dtype=torch.bool) for tokens in ids]],
+                "response_lens": [len(tokens) for tokens in ids], "reference_kls": [0.] * n}
 
     @staticmethod
     def tiny_reward_init(self):

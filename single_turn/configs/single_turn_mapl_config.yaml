@@ -3,7 +3,7 @@ extends: single_turn_magrpo_config.yaml
 
 travel:
   curriculum_short_epochs: 0
-  preference_generation_batch_size: 1
+  preference_generation_batch_size: 20
   offload_inactive_actors: true
 
 mapl:

@@ -49,7 +49,7 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
     """Share Travel generation, compact eval/iteration logs, and GPU residency."""
 
     def __init__(
-        self, *args, preference_generation_batch_size: int = 1,
+        self, *args, preference_generation_batch_size: int = 20,
         offload_inactive_actors: bool = True, **kwargs,
     ):
         self.preference_generation_batch_size = int(preference_generation_batch_size)

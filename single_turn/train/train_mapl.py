@@ -193,7 +193,7 @@ def main(default_algorithm=None):
         role_mode="partitioned_roles", stop_after_complete_json=True,
         rotate_eval_subset=False, greedy_eval=_bool(config.get("travel.greedy_eval", True)),
         curriculum_short_epochs=0,
-        preference_generation_batch_size=int(config.get("travel.preference_generation_batch_size", 1)),
+        preference_generation_batch_size=int(config.get("travel.preference_generation_batch_size", 20)),
         offload_inactive_actors=_bool(config.get("travel.offload_inactive_actors", True)),
     )
     trainer.verbose = _bool(config.get("output.verbose", True))
