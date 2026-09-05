@@ -127,11 +127,11 @@ The plan conventions are stated in both prompts:
   cities;
 - selected entities must come from the supplied reference information.
 
-## V9 reference/constraint reward
+## Reference/constraint reward
 
-V9 uses the v8 dense reward formula below together with the hard-aware budget
-prompts and duplicate-catalog evaluation fixes from commit `06bd07e`. Its
-historical reward backend name remains `reference_constraint_learnable_v8_budget_dense`.
+The task uses the fixed dense reward formula below together with hard-aware
+budget prompts and duplicate-catalog handling. The reward backend is named
+`reference_constraint_learnable_budget_dense`.
 
 Each row's reference information is parsed once into catalogs for restaurants,
 attractions, accommodations, flights, taxis, and self-driving routes. The
@@ -237,9 +237,9 @@ longer mistaken for a complete object and cropped early.
 
 The default keeps `advantage_mode=mean` but disables per-prompt unit-variance
 normalization. Earlier runs either amplified near-zero numerical noise or
-optimized recovery while strict collaboration fell to zero. V8 keeps the v7
-positive weights and strict endpoint, while its 5%
-bounded pre-validity surface makes distinct early outputs rankable.
+optimized recovery while strict collaboration fell to zero. The fixed reward
+preserves a strict success endpoint while its bounded 5% pre-validity surface
+makes distinct early outputs rankable.
 
 The rollout and train buffers are 10 prompts. This changes neither model memory
 residency nor the 5040-env-step budget, and averages a broader set of prompts per
@@ -304,7 +304,7 @@ For paper-style reporting, use `initial / final / delta` columns. The micro and
 dense metrics show incremental learning even when the all-or-nothing final
 success rate remains zero early in training.
 
-W&B uploads only the fixed-anchor `eval/*` scalar curves above. Training
+MAGRPO uploads only the fixed-anchor `eval/*` scalar curves above. Training
 metrics (`train/*` and stock `turn_1/*` aliases), full-pool `eval_full/*`
 metrics, and the `eval/samples` table are not uploaded. No W&B sample table is
 constructed.
@@ -363,7 +363,7 @@ python -u single_turn/train/train_magrpo.py \
 ```
 
 W&B defaults to project `Travel` and run name
-`Travel-magrpo-qwen3-4b-hard-budget-v9-60train`.
+`Travel-magrpo-qwen3-4b-hard-budget-60train`.
 
 ## MAPL preference algorithms (one GPU)
 
@@ -371,23 +371,44 @@ Travel now provides three adapters over the existing CoMLRL implementations:
 
 | Entry point | Training procedure | Default online/update budget |
 | --- | --- | --- |
-| `single_turn/train/train_marlhf.py` | Rank sampled joint actions with v9, fit a joint reward model once, then MAGRPO | 21 epochs × 60 prompts × 4 generations = 5040 online joint rollouts |
+| `single_turn/train/train_marlhf.py` | Rank sampled joint actions with the task reward, fit a joint reward model once, then MAGRPO | 21 epochs × 60 prompts × 4 generations = 5040 online joint rollouts |
 | `single_turn/train/train_marlhf_iter.py` | Refresh comparisons and refit the reward model before each online stage | 7 iterations × 3 epochs × 60 × 4 = 5040 online joint rollouts |
 | `single_turn/train/train_madpo_iter.py` | Iteratively compare joint actions and apply joint DPO, with λ=0.8 replay | At most 7 iterations × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
 
 All three reuse the existing role prompts, strict JSON generation, deterministic
-merge, v9 task reward, 60/20 split, and four-example fixed eval anchor. Unlike
+merge, fixed task reward, 60/20 split, and four-example fixed eval anchor. Unlike
 MAGRPO's short-trip warm-up, these configurations use all 60 training rows from
 the outset. No target/annotated plan is used to generate preference labels.
 The iterative comparator is `current_copy`: the same pre-update actor weights
 with an independent random-number stream, not a separately trained critic. On
 the same device CoMLRL reuses those weights instead of cloning two more actors.
 
-MARLHF's learned training reward is **unbounded**; its scale is not the v9
-scale. Evaluation always bypasses the learned model and uses the unchanged v9
+MARLHF's learned training reward is **unbounded**; its scale is not the task
+reward scale. Evaluation always bypasses the learned model and uses the fixed
 task reward in **[-0.25, 1.0]** and the usual success metrics, making eval curves
-comparable across algorithms. W&B still uploads only `eval/*` scalars: no train,
-eval_full, iteration-distribution panels, or sample tables.
+comparable across algorithms. All MAPL trainers upload the same `eval/*` scalars.
+MADPO iterative and MARLHF iterative additionally upload `iter/*`: iteration
+number, new/total/training preference-pair counts, candidate reward distributions
+(target vs comparator), and selected/replayed preference reward distributions.
+The default `mapl.log_reward_distribution=true` enables the distributions;
+setting it to false keeps the small iteration counters without distribution
+plots. Non-iterative MARLHF has no iterative refresh loop or `iter/*` panel.
+Training, full-pool eval, and sample-table uploads remain disabled.
+
+Distribution plots use 16 fixed bins over the current task reward's declared
+`reward_range`, currently **[-0.25, 1.0]**: x = raw task reward, y = sample count.
+They are not distributions of MARLHF's learned model scores, advantages, or DPO
+losses. The default reward processor is the identity (scale 1, no shift), so raw
+and processed task rewards coincide. A future processor scale/shift does not
+change these raw-reward plots; changing the task reward's declared min/max does.
+The underlying distribution JSON is saved beside preference replay in each
+iterative run's `reward_distributions` directory, including when W&B is disabled.
+
+MAPL eval curves use the explicit `env_step` x-axis; iteration scalar curves use
+`iter/current_iteration`. W&B's internal history step advances independently,
+so an iteration refresh and an eval at the same env step cannot drop each
+other's logs. The reward x-axis inside a distribution plot is separate from
+either training-progress axis.
 
 Preference collection is additional compute: default MARLHF collects 1200
 joint candidates once, while each iterative configuration collects 16,800

@@ -10,11 +10,13 @@ import gc
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from transformers import AutoModel, AutoTokenizer
 
 from comlrl.trainers.preference import MADPOIterTrainer, MARLHFIterTrainer, MARLHFTrainer
@@ -44,7 +46,7 @@ def _move_state(value: Any, device: torch.device) -> Any:
 
 
 class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
-    """Share Travel generation, eval-only logging, and bounded GPU residency."""
+    """Share Travel generation, compact eval/iteration logs, and GPU residency."""
 
     def __init__(
         self, *args, preference_generation_batch_size: int = 1,
@@ -278,10 +280,58 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         return {"turn_1/reward_mean": mean, "turn_1/expected_return": mean}
 
     def _log_iteration_replay(self, iteration_idx, *, train_pairs, current_pair_count, train_pair_count):
-        # Preference records already persist on disk. Honor Travel's eval-only
-        # W&B policy, including the unconditional iter/* writes in CoMLRL.
+        # Reuse CoMLRL's raw-reward bins/plots and selected-pair diagnostics,
+        # but do not commit with step=env_step: refresh and eval can share it.
+        distributions = self._log_reward_distribution_enabled()
+        if distributions:
+            self._write_iteration_reward_distribution(iteration_idx, train_pairs)
+        metrics = {
+            "iter/current_iteration": int(iteration_idx + 1),
+            "iter/current_preference_pairs": int(current_pair_count),
+            "iter/total_preference_pairs": sum(
+                shard.num_pairs for shard in getattr(self, "_preference_replay_shards_state", [])
+            ),
+            "iter/train_preference_pairs": int(train_pair_count),
+        }
+        if self.wandb_initialized and wandb.run is not None:
+            if distributions:
+                metrics.update(self._iteration_reward_distribution_metrics(iteration_idx))
+                metrics.update(self._selected_reward_distribution_metrics(iteration_idx, train_pairs))
+            self._log_mapl_metrics(metrics)
         if self.verbose:
             print(f"Travel iteration {iteration_idx + 1}: new_pairs={current_pair_count}, replay_pairs={train_pair_count}, preference_joint_candidates={self.preference_joint_candidates}")
+
+    def _log_wandb_eval_metrics(self, metrics):
+        self._log_mapl_metrics(metrics)
+
+    def _reward_distribution_dir(self):
+        # CoMLRL otherwise falls back to the source checkout when W&B is off.
+        # Keep distribution artifacts with this run's isolated replay instead.
+        if self.wandb_config is not None:
+            return super()._reward_distribution_dir()
+        path = Path(self._preference_replay_dir()).parent / "reward_distributions"
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    def _log_mapl_metrics(self, metrics):
+        if not self.wandb_initialized or wandb.run is None:
+            return
+        allowed = {key: value for key, value in metrics.items()
+                   if (key.startswith("eval/") or key.startswith("iter/"))
+                   and key != "eval/samples"}
+        if not allowed:
+            return
+        if not getattr(self, "_travel_mapl_axes_defined", False):
+            wandb.define_metric("env_step", hidden=True)
+            wandb.define_metric("eval/*", step_metric="env_step")
+            if hasattr(self.args, "num_iterations"):
+                wandb.define_metric("iter/current_iteration", hidden=True)
+                wandb.define_metric("iter/*", step_metric="iter/current_iteration")
+            self._travel_mapl_axes_defined = True
+        # W&B chooses a monotonically increasing internal history step. Explicit
+        # axes keep eval on env steps and iteration diagnostics on iterations,
+        # including a baseline and refresh that both occur at env_step=0.
+        wandb.log({"env_step": int(self.env_step), **allowed}, commit=True)
 
 
 class TravelJointRewardModel(nn.Module):

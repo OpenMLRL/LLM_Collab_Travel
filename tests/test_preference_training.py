@@ -193,7 +193,7 @@ class PreferenceAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "instead of truncating"):
             trainer._score_reward_texts(["toolong"])
 
-    def test_default_configs_keep_v9_and_budget_explicit(self):
+    def test_default_configs_keep_task_reward_and_budget_explicit(self):
         reference = load_config(ROOT / "single_turn/configs/single_turn_magrpo_config.yaml")
         for name in ("marlhf", "marlhf_iter", "madpo_iter"):
             config = load_config(ROOT / f"single_turn/configs/single_turn_{name}_config.yaml")
@@ -201,11 +201,94 @@ class PreferenceAdapterTests(unittest.TestCase):
             self.assertEqual(config.get_section("travel_reward"), reference.get_section("travel_reward"))
             self.assertEqual(config.get_section("dataset"), reference.get_section("dataset"))
             self.assertEqual(args.agent_devices, ["cuda:0", "cuda:0"])
+            if name.endswith("_iter"):
+                self.assertTrue(args.log_reward_distribution)
             report = budget_report(config, args, 60)
             self.assertEqual(report.get("online_rl_joint_rollouts", report.get("pair_counted_env_steps_upper_bound")), 5040)
             config.update({"mapl": {"parallel_training": "mp"}})
             with self.assertRaisesRegex(ValueError, "parallel_training"):
                 make_trainer_args(config)
+
+
+class PreferenceLoggingTests(unittest.TestCase):
+    def make_trainer(self, directory, *, enabled=True):
+        trainer = bare_trainer()
+        trainer.env_step = 0
+        trainer.args.num_iterations = 2
+        trainer.args.log_reward_distribution = enabled
+        trainer.args.preference_replay_dir = str(Path(directory) / "preference_replay")
+        trainer.wandb_config = None
+        trainer.wandb_initialized = True
+        trainer.verbose = False
+        trainer.reward_func = make_reward()
+        trainer._preference_replay_shards_state = [SimpleNamespace(num_pairs=2)]
+        trainer._reset_iteration_reward_distribution()
+        return trainer
+
+    def test_iter_distributions_and_eval_can_log_at_same_env_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = self.make_trainer(directory)
+            trainer._record_iteration_reward_distribution(
+                target_rewards=[-.25, .5, 1.], comparator_rewards=[.08, .25, .75])
+            selected = pair()
+            selected.target_raw_reward = .5
+            selected.comparator_raw_reward = .25
+            fake = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
+            with patch("single_turn.train.preference_trainer.wandb", fake), \
+                 patch.object(trainer, "_reward_distribution_line_image", return_value="line-plot") as line_plot, \
+                 patch.object(trainer, "_reward_distribution_bar_image", return_value="bar-plot"):
+                trainer._log_wandb_eval_metrics({"eval/reward": .4})
+                trainer._log_iteration_replay(0, train_pairs=[selected], current_pair_count=1, train_pair_count=1)
+                trainer._log_wandb_eval_metrics({
+                    "eval/reward": .5, "train/loss": 7., "eval_full/reward": .7,
+                    "eval/samples": "must not be uploaded", "turn_1/reward_mean": .5,
+                })
+            self.assertEqual(fake.log.call_count, 3)
+            for call in fake.log.call_args_list:
+                self.assertNotIn("step", call.kwargs)
+                self.assertTrue(call.kwargs["commit"])
+                self.assertEqual(call.args[0]["env_step"], 0)
+            metrics = fake.log.call_args_list[1].args[0]
+            self.assertEqual(metrics["iter/current_iteration"], 1)
+            self.assertEqual(metrics["iter/total_preference_pairs"], 2)
+            self.assertEqual(metrics["iter/reward_distribution/target_sample_count"], 3)
+            self.assertEqual(metrics["iter/selected_reward_distribution/pair_count"], 1)
+            self.assertIn("iter/reward_distribution/iteration_0001/line_plot", metrics)
+            self.assertIn("iter/selected_reward_distribution/iteration_0001/bar_plot", metrics)
+            self.assertEqual(fake.log.call_args_list[2].args[0], {"env_step": 0, "eval/reward": .5})
+            fake.define_metric.assert_any_call("eval/*", step_metric="env_step")
+            fake.define_metric.assert_any_call("iter/*", step_metric="iter/current_iteration")
+            self.assertEqual(fake.define_metric.call_count, 4)
+            for call in line_plot.call_args_list:
+                edges = call.kwargs["edges"]
+                self.assertEqual((edges[0], edges[-1], len(edges)), (-.25, 1., 17))
+            record = json.loads((Path(directory) / "reward_distributions/iteration_0001.json").read_text())
+            self.assertEqual((record["reward_min"], record["reward_max"], record["num_bins"]), (-.25, 1., 16))
+
+    def test_distribution_disabled_keeps_only_iteration_counters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = self.make_trainer(directory, enabled=False)
+            fake = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
+            with patch("single_turn.train.preference_trainer.wandb", fake):
+                trainer._log_iteration_replay(0, train_pairs=[], current_pair_count=0, train_pair_count=0)
+            self.assertEqual(set(fake.log.call_args.args[0]), {
+                "env_step", "iter/current_iteration", "iter/current_preference_pairs",
+                "iter/total_preference_pairs", "iter/train_preference_pairs"})
+            self.assertFalse((Path(directory) / "reward_distributions").exists())
+
+    def test_distribution_uses_declared_raw_range_not_processed_reward(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = self.make_trainer(directory)
+            trainer.reward_func = make_reward({"min_reward": -.5, "max_reward": 2.})
+            trainer.reward_processor = lambda reward: reward * 10 + 7
+            good, bad = valid_completions(), all_dash_completions()
+            raw, processed = trainer._compute_raw_and_processed_rewards(
+                ["prompt"], [[good[0], bad[0]], [good[1], bad[1]]], batch_items=[fixture_item()])
+            self.assertEqual(processed, [value * 10 + 7 for value in raw])
+            trainer._record_iteration_reward_distribution(target_rewards=raw, comparator_rewards=raw)
+            self.assertEqual(trainer._iteration_reward_distribution["target"], raw)
+            edges = trainer._reward_distribution_bin_edges()
+            self.assertEqual((edges[0], edges[-1]), (-.5, 2.))
 
 
 class PreferenceLoopTests(unittest.TestCase):
@@ -216,7 +299,9 @@ class PreferenceLoopTests(unittest.TestCase):
                        train_batch_size=1, rollout_buffer_size=1, advantage_normalization=False)
         if cls != TravelMARLHFTrainer:
             options.update(num_iterations=2, comparator_policy="current_copy", comparator_devices=["cpu", "cpu"],
-                           preference_replay_dir=directory, preference_replay_mode="lambda_decay", preference_replay_lambda=.8)
+                           preference_replay_dir=str(Path(directory) / "preference_replay"),
+                           log_reward_distribution=True,
+                           preference_replay_mode="lambda_decay", preference_replay_lambda=.8)
         if cls != TravelMADPOIterTrainer:
             options.update(num_generations=2, reward_model_device="cpu", reward_num_train_epochs=1)
         trainer = cls(agents=[GPT2LMHeadModel(tiny_config()), GPT2LMHeadModel(tiny_config())],
@@ -249,7 +334,7 @@ class PreferenceLoopTests(unittest.TestCase):
 
     @staticmethod
     def scripted_generation(self, agent, batch_items, *, agent_idx, num_return_sequences, **kwargs):
-        # Exercise actual CoMLRL candidate pairing/replay/training with real v9
+        # Exercise actual CoMLRL candidate pairing/replay/training with the task
         # rewards and real tiny actor gradients, without a remote model download.
         idx = getattr(agent, "test_candidate_index", 0)
         agent.test_candidate_index = idx + 1
@@ -293,6 +378,8 @@ class PreferenceLoopTests(unittest.TestCase):
                 self.assertGreater(trainer.preference_pairs_generated, 0)
                 self.assertGreater(trainer.env_step, 0)
                 self.assertFalse(trainer._should_log_train(trainer.env_step))
+                if cls != TravelMARLHFTrainer:
+                    self.assertEqual(len(list((Path(directory) / "reward_distributions").glob("iteration_*.json"))), 2)
                 for idx, actor in enumerate(trainer.agents):
                     self.assertTrue(any(not torch.equal(value, before[idx][key]) for key, value in actor.state_dict().items()))
                 if cls != TravelMADPOIterTrainer:

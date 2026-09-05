@@ -71,8 +71,8 @@ travel:
   curriculum_days: [3]
 
 travel_reward:
-  # Reward v8 keeps the successful strict joint weights from v7 while the
-  # evaluator supplies dense cost-completeness and over-budget progress.
+  # Fixed strict joint reward with dense cost-completeness and over-budget
+  # progress supplied by the evaluator.
   # The two 0.02/0.03 malformed-output channels remain tightly bounded.
   protocol_progress_weight: 0.02
   recovered_semantic_weight: 0.03
@@ -144,7 +144,7 @@ wandb:
   enabled: true
   project: Travel
   entity: OpenMLRL
-  name: Travel-magrpo-qwen3-4b-hard-budget-v9-60train
+  name: Travel-magrpo-qwen3-4b-hard-budget-60train
   dir: output_single_turn_magrpo
   tags:
   - magrpo
@@ -153,9 +153,9 @@ wandb:
   - qwen3-4b-instruct-2507
   - decentralized
   - role-guided
-  - reward-v8-budget-dense
+  - reward-budget-dense
   - hard-aware-budget-contract
-  - fixed-skeleton-v8
+  - fixed-skeleton
   - two-stage-3day-curriculum
   - greedy-fixed-anchor
   - compact-role-catalogs

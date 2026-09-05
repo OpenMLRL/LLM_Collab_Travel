@@ -1,4 +1,4 @@
-# Shared Travel contract/data/reward; do not fork the v9 domain implementation.
+# Shared Travel contract/data/reward; do not fork the fixed domain implementation.
 extends: single_turn_magrpo_config.yaml
 
 travel:
@@ -36,4 +36,4 @@ evaluation:
 wandb:
   project: Travel
   dir: null
-  tags: [travelplanner, mapl, reward-v9, single-b200, eval-only]
+  tags: [travelplanner, mapl, reward-budget-dense, single-b200, compact-logging]

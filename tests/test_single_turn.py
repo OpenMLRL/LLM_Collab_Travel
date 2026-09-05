@@ -459,7 +459,7 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertAlmostEqual(reward, 1.0, places=6)
         self.assertEqual(
             detail["reward_backend"],
-            "reference_constraint_learnable_v8_budget_dense",
+            "reference_constraint_learnable_budget_dense",
         )
         self.assertEqual(detail["ultimate/reference_plan_success"], 1.0)
         self.assertEqual(detail["ultimate/reference_plan_delivery"], 1.0)

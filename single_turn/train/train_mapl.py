@@ -72,8 +72,6 @@ def make_trainer_args(config):
         raise ValueError("Travel MAPL requires a decentralized comparator.")
     if getattr(args, "preference_scoring_reward", "task") != "task":
         raise ValueError("Travel preference labels must come from the task reward.")
-    if getattr(args, "log_reward_distribution", False):
-        raise ValueError("Travel MAPL keeps log_reward_distribution=false; only eval scalars are uploaded.")
     if args.eval_batch_size != 1 or getattr(args, "reward_train_batch_size", 1) != 1:
         raise ValueError("Use eval_batch_size=1 and reward_train_batch_size=1 for long Travel contexts.")
     if config.get("travel.curriculum_short_epochs", 0) != 0:
@@ -93,7 +91,7 @@ def budget_report(config, args, train_count):
     report = {
         "preference_joint_rollouts": iterations * train_count * (args.preference_num_candidates + comparator),
         "preference_refreshes": iterations,
-        "eval_uses": "v9 task reward, not the learned reward model",
+        "eval_uses": "fixed task reward, not the learned reward model",
     }
     if config.get("algorithm") == "madpo_iter":
         pair_limit = args.preference_pairs_per_sample

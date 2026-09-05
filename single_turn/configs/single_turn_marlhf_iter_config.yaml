@@ -11,8 +11,8 @@ mapl:
   preference_scoring_reward: task
   preference_replay_mode: lambda_decay
   preference_replay_lambda: 0.8
-  log_reward_distribution: false
+  log_reward_distribution: true
 output:
   base_dir: output_single_turn_marlhf_iter
 wandb:
-  name: Travel-marlhf-iter-qwen3-4b-v9
+  name: Travel-marlhf-iter-qwen3-4b

@@ -249,7 +249,7 @@ def evaluate_single_turn_response(
         "ultimate/collaboration_success": collaboration_success,
         "merged_plan": result.plan,
         "parser_errors": [list(parsed.error_codes) for parsed in result.parsed],
-        "evaluation_backend": "reference_constraint_scaffold_v3_completion_metrics",
+        "evaluation_backend": "reference_constraint_scaffold_completion_metrics",
         **plan_detail,
     }
 

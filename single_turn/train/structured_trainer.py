@@ -525,8 +525,12 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                 if key.startswith("eval/")
             }
             if wandb_metrics:
-                wandb.log(wandb_metrics, step=self.env_step, commit=True)
+                self._log_wandb_eval_metrics(wandb_metrics)
         return metrics
+
+    def _log_wandb_eval_metrics(self, metrics: Dict[str, Any]) -> None:
+        """Keep MAGRPO's existing logging; preference trainers can supply axes."""
+        wandb.log(metrics, step=self.env_step, commit=True)
 
     def evaluate(self, num_eval_samples: Optional[int] = None) -> Dict[str, Any]:
         """Evaluate a stable held-out shard while leaving stock MAGRPO untouched."""

@@ -16,4 +16,4 @@ mapl:
 output:
   base_dir: output_single_turn_marlhf
 wandb:
-  name: Travel-marlhf-qwen3-4b-v9
+  name: Travel-marlhf-qwen3-4b
