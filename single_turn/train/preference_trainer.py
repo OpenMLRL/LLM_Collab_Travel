@@ -25,6 +25,8 @@ from comlrl.utils.distributed import unwrap_model
 from comlrl.utils.tokenizer_utils import ensure_pad_token
 from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer
 from single_turn.formatting import build_agent_json_prefill
+from single_turn.centralized_comparator import joint_slots, project_role_tokens
+from single_turn.structured_generation import wrap_formatter_with_chat_template
 
 
 @dataclass
@@ -158,7 +160,7 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             if callable(drain):
                 drain()
 
-    def _load_comparator_agents(self):
+    def _validate_model_comparator_vocabulary(self):
         # Structured Travel actions and replay masks use the actors' token IDs.
         # Reject an incompatible external vocabulary before loading its weights.
         source = self.args.comparator_model_name
@@ -172,6 +174,10 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
                     "to preserve constrained actions and preference token masks."
                 )
             self._travel_verified_comparator_tokenizers = verified | {source}
+
+    def _load_comparator_agents(self):
+        self._validate_model_comparator_vocabulary()
+        source = self.args.comparator_model_name
         devices = self._resolve_comparator_devices()
         if len(set(devices)) == 1:
             # With parallel_training=none the two role calls are sequential.
@@ -180,6 +186,78 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             frozen = self._load_single_frozen_policy_agent(source, 0)
             return [frozen] * self.num_agents
         return super()._load_comparator_agents()
+
+    def _get_centralized_comparator_agent(self):
+        if self.args.comparator_policy == "model":
+            self._validate_model_comparator_vocabulary()
+        return super()._get_centralized_comparator_agent()
+
+    def _build_centralized_comparator_prompt(self, batch_item):
+        raw = self.centralized_comparator_adapter.build_prompt(batch_item, [])
+        formatter = wrap_formatter_with_chat_template(
+            lambda item: raw, self.tokenizers[0],
+            system_prompt="You are one centralized travel planner. Plan both roles jointly and return only the requested fixed-schema JSON.",
+        )
+        return formatter(batch_item)
+
+    def _generate_centralized_comparator_outputs_for_item(self, batch_item, *, iteration_idx, num_candidates, **kwargs):
+        if self.args.comparator_policy != "history":
+            return super()._generate_centralized_comparator_outputs_for_item(
+                batch_item, iteration_idx=iteration_idx, num_candidates=num_candidates, **kwargs)
+        checkpoint = self._history_policy_checkpoint_path(iteration_idx)
+        key = (int(iteration_idx), checkpoint)
+        if getattr(self, "_travel_central_history_key", None) != key:
+            self._clear_travel_central_history()
+            self._travel_central_history_agent = self._load_single_policy_checkpoint_agent(checkpoint, 0)
+            self._travel_central_history_key = key
+        return self._generate_centralized_policy_output_for_agent(
+            self._travel_central_history_agent, batch_item,
+            prompt=self._build_centralized_comparator_prompt(batch_item),
+            num_candidates=num_candidates, **kwargs)
+
+    def _clear_travel_central_history(self):
+        agent = getattr(self, "_travel_central_history_agent", None)
+        self._travel_central_history_agent = None
+        self._travel_central_history_key = None
+        if agent is not None:
+            self._clear_transient_comparator_agents([agent])
+
+    def _generate_centralized_policy_output_for_agent(self, policy_agent, batch_item, *, prompt, num_candidates, **kwargs):
+        if self._centralized_comparator_agent_index() != 0:
+            raise ValueError("Travel centralized comparator uses policy agent index 0.")
+        # The joint teacher has the same aggregate token budget as two role calls.
+        budget = self.num_agents * int(self.args.max_new_tokens)
+        input_length = len(self.tokenizers[0].encode(
+            prompt + build_agent_json_prefill(0, batch_item['days']), add_special_tokens=False))
+        model_limit = getattr(unwrap_model(policy_agent).config, 'max_position_embeddings', None)
+        if model_limit and input_length + budget > int(model_limit):
+            raise ValueError("Centralized Travel prompt plus output budget exceeds the model context window; refusing truncation.")
+        all_texts = []
+        # Park unused actors/optimizer states while the single teacher generates.
+        unused = [i for i, actor in enumerate(self.agents) if unwrap_model(actor) is not unwrap_model(policy_agent)]
+        with self._offload_actors(unused), self._comparator_rng(policy_agent):
+            for start in range(0, num_candidates, self.preference_generation_batch_size):
+                count = min(self.preference_generation_batch_size, num_candidates - start)
+                result = StructuredOutputMAGRPOTrainer._generate_completions(
+                    self, policy_agent, [batch_item], agent_idx=0,
+                    num_return_sequences=count, max_new_tokens=budget,
+                    prompts_override=[prompt], slot_order_override=joint_slots(batch_item['days']), **kwargs)
+                all_texts.extend(result['completions'][0])
+        self.preference_joint_candidates += len(all_texts)
+        outputs = [{'prompts': [self.formatters[i](batch_item) + build_agent_json_prefill(i, batch_item['days'])],
+                    'batch_items': [batch_item], 'completions': [[]]} for i in range(2)]
+        for joint_text in all_texts:
+            split = self.centralized_comparator_adapter.parse_completion(joint_text, batch_item, self.num_agents)
+            for i, role_text in enumerate(split):
+                text, tokens, mask = project_role_tokens(self.tokenizers[i], role_text, i, batch_item['days'])
+                role_prompt = outputs[i]['prompts'][0]
+                outputs[i]['completions'][0].append(text)
+                if self._preference_trajectories is not None:
+                    encoded = self.tokenizers[i]([role_prompt], padding=True, truncation=False, return_tensors='pt')
+                    # Identical target text keeps its original, exact sampled trajectory.
+                    self._preference_trajectories.setdefault((i, role_prompt, text),
+                        (encoded.input_ids[0].detach().cpu().clone(), tokens, mask))
+        return outputs
 
     def _generate_history_policy_outputs_for_item(
         self, batch_item, *, iteration_idx, num_candidates, **kwargs,
@@ -211,6 +289,7 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             super()._clear_iteration_current_copy_comparator()
         finally:
             self._clear_travel_history_comparator()
+            self._clear_travel_central_history()
 
     @staticmethod
     def _preference_pair_to_record(pair):

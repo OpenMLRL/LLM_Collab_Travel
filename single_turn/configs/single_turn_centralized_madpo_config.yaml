@@ -1,0 +1,11 @@
+extends: single_turn_madpo_config.yaml
+mapl:
+  collaboration_mode: centralized
+  num_agents: 2  # Logical roles, one physical actor.
+  agent_devices: [cuda:0]
+  max_new_tokens: 2048
+output:
+  base_dir: output_single_turn_centralized_madpo
+wandb:
+  name: travel-madpo-cenactor
+  tags: [travelplanner, mapl, centralized-collaboration, joint-actor, fixed-reward]

@@ -70,8 +70,11 @@ def make_trainer_args(config):
         raise ValueError("Travel MAPL supports local current/current_copy/history/model comparators only.")
     if getattr(args, "comparator_policy", None) == "model" and args.comparator_agents is not None:
         raise ValueError("Travel model comparators use comparator_model_name, not comparator_agents.")
-    if getattr(args, "comparator_generation_mode", "decentralized") != "decentralized":
-        raise ValueError("Travel MAPL requires a decentralized comparator.")
+    comparator_mode = getattr(args, "comparator_generation_mode", "decentralized")
+    if comparator_mode not in {"decentralized", "centralized"}:
+        raise ValueError("Travel comparator mode must be decentralized or centralized.")
+    if comparator_mode == "centralized" and int(args.comparator_centralized_agent_index) != 0:
+        raise ValueError("Travel centralized comparator uses policy agent index 0.")
     if getattr(args, "preference_scoring_reward", "task") != "task":
         raise ValueError("Travel preference labels must come from the task reward.")
     if args.eval_batch_size != 1 or getattr(args, "reward_train_batch_size", 1) != 1:
@@ -177,6 +180,7 @@ def main(default_algorithm=None):
         wandb_config["output_dir"] = str(output)
         wandb_config["name"] = f"{wandb_config['name']}-seed{seed}-{job}"
     trainers = {"madpo": TravelMADPOTrainer, "madpo_iter": TravelMADPOIterTrainer, "marlhf": TravelMARLHFTrainer, "marlhf_iter": TravelMARLHFIterTrainer}
+    from single_turn.centralized_comparator import TravelCentralizedComparatorAdapter
     trainer = trainers[config.get("algorithm")](
         agent_model=model.name if names is None else None, agents=names, num_agents=2,
         tokenizer=tokenizers, model_config={"torch_dtype": model.torch_dtype,
@@ -187,6 +191,7 @@ def main(default_algorithm=None):
             force_json_prefix=True, tokenizers=tokenizers, use_chat_template=True,
             system_prompt=config.get("travel.system_prompt")),
         wandb_config=wandb_config, args=args,
+        centralized_comparator_adapter=TravelCentralizedComparatorAdapter(),
         eval_logger=build_single_turn_eval_logger(eval_rows, reward_config=reward.config, panel_size=args.eval_num_samples),
         eval_aggregator=aggregate_single_turn_metrics,
         chat_formatted_prompts=True, force_json_prefix=True, constrain_json_skeleton=True,

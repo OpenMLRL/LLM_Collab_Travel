@@ -1,8 +1,8 @@
 extends: single_turn_mapl_config.yaml
 algorithm: madpo_iter
 mapl:
-  # At most 7 * 60 * 6 * 2 = 5040 pair-counted env steps. Ties reduce this.
-  num_iterations: 7
+  # At most 6 * 60 * 6 * 2 = 4320 pair-counted env steps. Ties reduce this.
+  num_iterations: 6
   num_train_epochs: 1
   pair_selection: comparator_reward
   comparator_policy: current_copy

@@ -383,7 +383,7 @@ Travel provides both iterative and non-iterative adapters over CoMLRL:
 | `single_turn/train/train_madpo.py` | Collect task-reward preferences once, then optimize the fixed dataset with joint DPO | At most 7 epochs × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
 | `single_turn/train/train_marlhf.py` | Rank sampled joint actions with the task reward, fit a joint reward model once, then MAGRPO | 21 epochs × 60 prompts × 4 generations = 5040 online joint rollouts |
 | `single_turn/train/train_marlhf_iter.py` | Refresh comparisons and refit the reward model before each online stage | 6 iterations × 3 epochs × 60 × 4 = 4320 online joint rollouts |
-| `single_turn/train/train_madpo_iter.py` | Iteratively compare joint actions and apply joint DPO, with λ=0.8 replay | At most 7 iterations × 60 prompts × 6 pairs × 2 = 5040 pair-counted env steps |
+| `single_turn/train/train_madpo_iter.py` | Iteratively compare joint actions and apply joint DPO, with λ=0.8 replay | At most 6 iterations × 60 prompts × 6 pairs × 2 = 4320 pair-counted env steps |
 
 All four reuse the existing role prompts, strict JSON generation, deterministic
 merge, fixed task reward, 60/20 split, and four-example fixed eval anchor. Unlike
@@ -397,7 +397,8 @@ Local decentralized comparator ablations also support `comparator_policy=history
 with `comparator_history_k`, and `comparator_policy=model` with a frozen
 `comparator_model_name`. External models must have the same token-to-ID
 vocabulary as the actors, because Travel preserves constrained action tokens
-and masks in preference replay. Centralized and API comparators are not enabled.
+and masks in preference replay. Both decentralized and centralized local
+comparators are supported; API comparators remain disabled.
 The history checkpoint is cached for one preference-collection phase and released
 before reward-model fitting. Identical frozen model weights on one comparator
 device are shared between the two sequential role calls; prompts and sampled
@@ -412,6 +413,23 @@ Comparator collection and reward-model fitting occur in separate phases, so
 their weights do not have to coexist. Allocation scripts must expose both GPUs;
 merely requesting an extra GPU does not redistribute models. Device placement
 does not change the replay lambda, reward, candidate count, or training budget.
+
+Set `mapl.comparator_generation_mode=centralized` for a single teacher to see both
+role contexts and generate all itinerary slots jointly. The teacher uses policy
+index 0, the same value-only JSON grammar, and the aggregate output-token budget
+of both role calls. Its single output is split deterministically into the original
+logistics/experience actions before the unchanged task reward and preference
+selection. Actors and online evaluation remain decentralized. Central teacher
+projections are encoded under each actor's own prompt with value/schema masks;
+native role generations retain their exact sampled token trajectories. Neither
+path reads `annotated_plan` or `gold_plan`.
+
+For comparator ablations, use BFCL-style names such as
+`travel-marlhf-iter-central-currentcmp-seed42-JOBID` (centralized) and
+`travel-marlhf-iter-currentcmp-seed42-JOBID` (decentralized). Other teacher labels
+are `history1` and the model name. Reserve `current` for the current-data replay
+ablation, not the current-policy comparator; keep the replay setting in config
+and experiment group/tags.
 
 MARLHF's learned training reward is **unbounded**; its scale is not the task
 reward scale. Evaluation always bypasses the learned model and uses the fixed
@@ -443,10 +461,9 @@ other's logs. The reward x-axis inside a distribution plot is separate from
 either training-progress axis.
 
 Preference collection is additional compute: default MADPO and MARLHF collect 1200
-joint candidates once. MADPO-Iter collects 16,800 across seven refreshes;
-MARLHF-Iter collects 14,400 across six refreshes (20 target + 20 comparator
-candidates per prompt). MARLHF-Iter now defaults to six iterations; the other
-algorithms' budgets are unchanged.
+joint candidates once. MADPO-Iter and MARLHF-Iter each collect 14,400 across six
+refreshes (20 target + 20 comparator candidates per prompt). Both iterative
+algorithms default to six iterations; the non-iterative budgets are unchanged.
 Ties produce no preference, so actual pair counts and completed update steps
 can be lower. MADPO's pair-counted steps include replay and are not fresh
 rollouts. These settings approximate the old plotted step budget, **not equal
@@ -518,6 +535,76 @@ successful training run. Check the final `preference_pairs` and `env_steps`.
 Each run writes its resolved
 configuration and final actors under a unique job/seed/time output directory;
 iterative preference replay stays in that run directory.
+
+## Centralized collaboration (independent opt-in entrypoint)
+
+Travel `main` also supports the joint-policy baseline from the other domains'
+`cen` branches. This is **not** the comparator-only ablation: one trainable model
+sees both roles' contexts and emits every day/field in one joint JSON action.
+There is one actor, tokenizer and optimizer; `num_agents: 2` describes the two
+logical roles used at the environment boundary, not two model copies.
+
+Use `single_turn/train/train_centralized.py`, with `--algorithm` set to `magrpo`,
+`madpo`, `madpo_iter`, `marlhf` or `marlhf_iter`. It selects a separate
+`single_turn_centralized_<algorithm>_config.yaml`. No existing entrypoint or
+default configuration switches to centralized training automatically.
+
+The new entrypoint requires CoMLRL's centralized actor APIs, as in CoMLRL `cen`
+commit `998ea13` (or a revision containing it). The conventional sibling CoMLRL
+checkout is used by default. To keep an older core used by other jobs untouched,
+point **only this entrypoint** at a separate checkout using
+`TRAVEL_COMLRL_ROOT=/absolute/path/to/isolated/CoMLRL`. An older incompatible core
+fails before loading models; it never silently falls back to two actors.
+
+```bash
+# Data / joint-output / reward checks, without model weights.
+python single_turn/train/train_centralized.py --algorithm marlhf_iter --dry-run
+
+# One joint actor; centralized current-copy comparator for iterative MAPL.
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TOKENIZERS_PARALLELISM=false \
+python -u single_turn/train/train_centralized.py --algorithm marlhf_iter \
+  --override seed=42
+```
+
+The iterative defaults remain six iterations, 20 target and 20 comparator
+candidates per question, up to six selected pairs, and lambda-decay replay with
+lambda 0.8. `current`, `current_copy`, `history` and compatible-vocabulary `model`
+comparators all generate a joint action. Non-iterative MADPO/MARLHF collect
+preferences from the joint actor, as in the other domains; they do not have an
+iterative comparator refresh. MAGRPO uses task reward directly and has no
+comparator or learned reward model.
+
+The data filter, 60/20 split, four-example periodic eval anchor, final 20-example
+evaluation and fixed `[-0.25, 1.0]` task reward are inherited unchanged. MAGRPO
+retains its 5040-step curriculum. MAPL retains its existing schedules (4320 online
+steps for six-iteration MARLHF; MADPO's pair-counted budget can shrink with ties).
+The **total joint** output budget is 2048 tokens, matching the sum of the original
+two 1024-token role budgets; each value retains the same token limit. This is not
+equal compute: one causal joint response can condition later choices on earlier
+ones, and has a longer input/output than either decentralized role separately.
+
+Full joint completion tokens and value-only masks are retained for training,
+including comparator candidates and replay. We do not split/re-tokenize a joint
+trajectory to train artificial role policies. Only rewards and metrics split
+the joint JSON into the original logistics and experience actions, then use the
+unchanged merger/evaluator. No annotated or gold plan is read. Invalid joint
+JSON counts as a failed action, rather than crashing the reward call.
+
+Outputs, replay and policy checkpoints use a separate, unique run directory.
+Joint replay is explicitly marked and rejects decentralized replay records.
+W&B names include `cenactor`; iterative defaults also include
+`central-currentcmp`, e.g.
+`travel-marlhf-iter-cenactor-central-currentcmp-seed42-<job>`.
+Thus `central` alone continues to mean the old **two-actor, central-comparator**
+ablation. Logging keeps the same compact eval/iter/distribution policy (and
+`turn_1` for MAGRPO), without restoring train, eval_full or sample-table panels.
+
+The new integration is tested with tiny CPU actors and real optimizer updates,
+not yet benchmarked with 4B models on B200. One actor reduces actor/model-state
+memory, but the longer joint context and reward-model phase still need a GPU
+smoke test before assuming a particular generation batch or memory peak.
 
 ## Tests
 

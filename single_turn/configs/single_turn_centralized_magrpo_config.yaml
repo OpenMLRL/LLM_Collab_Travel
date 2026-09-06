@@ -1,0 +1,15 @@
+# Opt-in joint actor. The existing decentralized config remains untouched.
+extends: single_turn_magrpo_config.yaml
+algorithm: magrpo
+magrpo:
+  collaboration_mode: centralized
+  num_agents: 2  # Logical roles; CoMLRL creates ONE actor and optimizer.
+  parallel_training: none
+  agent_devices: [cuda:0]
+  max_new_tokens: 2048  # Total joint budget = two original 1024-token role budgets.
+output:
+  base_dir: output_single_turn_centralized_magrpo
+wandb:
+  name: travel-magrpo-cenactor
+  dir: null
+  tags: [travelplanner, magrpo, centralized-collaboration, joint-actor, fixed-reward]

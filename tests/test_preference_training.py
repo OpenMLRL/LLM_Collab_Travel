@@ -206,13 +206,15 @@ class PreferenceAdapterTests(unittest.TestCase):
             self.assertEqual(args.preference_pairs_per_sample, 6)
             if name.endswith("_iter"):
                 self.assertTrue(args.log_reward_distribution)
-            if name == "marlhf_iter":
                 self.assertEqual(args.num_iterations, 6)
-                self.assertEqual(args.num_train_epochs, 3)
+                self.assertEqual(args.num_train_epochs, 1 if name == "madpo_iter" else 3)
                 self.assertEqual(args.preference_replay_lambda, .8)
             report = budget_report(config, args, 60)
-            expected_budget = 4320 if name == "marlhf_iter" else 5040
+            expected_budget = 4320 if name.endswith("_iter") else 5040
             self.assertEqual(report.get("online_rl_joint_rollouts", report.get("pair_counted_env_steps_upper_bound")), expected_budget)
+            if name.endswith("_iter"):
+                self.assertEqual(report["preference_refreshes"], 6)
+                self.assertEqual(report["preference_joint_rollouts"], 14400)
             config.update({"mapl": {"parallel_training": "mp"}})
             with self.assertRaisesRegex(ValueError, "parallel_training"):
                 make_trainer_args(config)
@@ -236,8 +238,7 @@ class ComparatorAdapterTests(unittest.TestCase):
             self.assertEqual(args.comparator_devices, ["cuda:1", "cuda:1"])
             self.assertEqual(args.reward_model_device, "cuda:1")
             config.update({"mapl": {"comparator_generation_mode": "centralized"}})
-            with self.assertRaisesRegex(ValueError, "decentralized"):
-                make_trainer_args(config)
+            self.assertEqual(make_trainer_args(config).comparator_generation_mode, "centralized")
 
     def test_external_same_device_roles_share_frozen_weights_only(self):
         trainer = bare_trainer()

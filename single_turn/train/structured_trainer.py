@@ -682,6 +682,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         max_new_tokens: int = 128,
         prompts_override: Optional[List[str]] = None,
         external_prompts: Any = None,
+        slot_order_override: Optional[List[tuple]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         prompts = self._resolve_prompts(
@@ -725,9 +726,11 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         prompt_length = int(prompt_encodings.input_ids.shape[-1])
         skeleton_processor = None
         if getattr(self, "constrain_json_skeleton", False):
+            if slot_order_override is not None and len(batch_items) != 1:
+                raise ValueError("A joint Travel slot override requires one input question.")
             slot_orders = [
                 tuple(
-                    ordered_owned_slots(
+                    slot_order_override if slot_order_override is not None else ordered_owned_slots(
                         agent_idx,
                         int(item.get("days", 0)),
                     )
