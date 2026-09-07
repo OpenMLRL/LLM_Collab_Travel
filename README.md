@@ -632,3 +632,8 @@ Repository edits are intentionally left uncommitted for review in GitHub
 Desktop. Commit, push, and remote-cluster synchronization happen only when
 explicitly requested. Temporary Slurm scripts and profiling artifacts stay
 outside this repository.
+
+## Slurm runtime cache
+
+Training launchers isolate unset CUDA JIT caches per job on node-local storage.
+Update CoMLRL alongside this checkout; see the [runtime cache guide](docs/runtime_cache.md).

@@ -114,6 +114,10 @@ def make_trainer_args(config):
 
 
 def main():
+    from comlrl.runtime import configure_job_cuda_cache
+
+    configure_job_cuda_cache()
+
     parser = add_config_args(argparse.ArgumentParser(description=__doc__))
     parser.add_argument("--algorithm", choices=ALGORITHMS)
     parser.add_argument("--dry-run", action="store_true", help="Check data, joint contract and reward without loading weights.")

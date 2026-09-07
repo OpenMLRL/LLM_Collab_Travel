@@ -113,6 +113,10 @@ def budget_report(config, args, train_count):
 
 
 def main(default_algorithm=None):
+    from comlrl.runtime import configure_job_cuda_cache
+
+    configure_job_cuda_cache()
+
     parser = add_config_args(argparse.ArgumentParser(description=__doc__))
     parser.add_argument("--algorithm", choices=ALGORITHMS, default=default_algorithm)
     parser.add_argument("--dry-run", action="store_true", help="Validate data/reward/config without loading model weights.")
