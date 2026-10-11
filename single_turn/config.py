@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -127,3 +129,8 @@ def parse_overrides(overrides: Optional[list[str]]) -> Dict[str, Any]:
             current = current.setdefault(part, {})
         current[parts[-1]] = _parse_override_value(raw_value)
     return result
+
+
+def run_id() -> str:
+    """Return a time-pid id so concurrent launches write to separate directories."""
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"

@@ -20,8 +20,8 @@ Use the same output directory and CUDA device count for continuation.
 
 SIGUSR1 or the soft deadline pauses only at a durable question/optimizer boundary
 and exits 85. Other exceptions fail normally and must not be blindly requeued.
-An external 12-hour Slurm launcher should verify `checkpoint_status.json`,
-check that `work_progress` advances, and requeue the same job only on exit 85.
+An external launcher with a 12-hour time limit should verify `checkpoint_status.json`,
+check that `work_progress` advances, and restart the same run only on exit 85.
 Use a 10-hour soft deadline plus SIGUSR1 30 minutes before the hard limit.
 Initial/final full evaluation is not interrupted; leave enough margin for it.
 

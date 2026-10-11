@@ -114,10 +114,6 @@ def make_trainer_args(config):
 
 
 def main():
-    from comlrl.runtime import configure_job_cuda_cache
-
-    configure_job_cuda_cache()
-
     parser = add_config_args(argparse.ArgumentParser(description=__doc__))
     parser.add_argument("--algorithm", choices=ALGORITHMS)
     parser.add_argument("--dry-run", action="store_true", help="Check data, joint contract and reward without loading weights.")
@@ -201,8 +197,7 @@ def main():
     if config.get("tokenizer.padding_side"):
         tokenizer.padding_side = str(config.get("tokenizer.padding_side"))
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    job = os.environ.get("SLURM_JOB_ID", "local")
-    output = Path(config.get("output.base_dir")) / f"job_{job}_seed{seed}_{stamp}"
+    output = Path(config.get("output.base_dir")) / f"seed{seed}_{stamp}"
     output.mkdir(parents=True, exist_ok=False)
     if hasattr(args, "preference_replay_dir") and args.preference_replay_dir is None:
         args.preference_replay_dir = str(output / "preference_replay")
@@ -212,7 +207,7 @@ def main():
     if wandb_config is not None:
         wandb_config["dir"] = config.get("wandb.dir") or str(output)
         wandb_config["output_dir"] = str(output)
-        wandb_config["name"] = f"{wandb_config['name']}-seed{seed}-{job}"
+        wandb_config["name"] = f"{wandb_config['name']}-seed{seed}"
     adapter = TravelCentralizedCollaborationAdapter(tokenizer)
     trainers = dict(zip(ALGORITHMS, (
         TravelCentralizedMAGRPOTrainer, TravelCentralizedMADPOTrainer,

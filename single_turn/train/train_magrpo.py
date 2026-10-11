@@ -20,7 +20,7 @@ for path in (COMLRL_ROOT, REPO_ROOT):
         sys.path.insert(0, str(path))
 
 from single_turn.aggregation import owned_slots
-from single_turn.config import Config, add_config_args, parse_overrides
+from single_turn.config import Config, add_config_args, parse_overrides, run_id
 from single_turn.data import load_single_turn_datasets
 from single_turn.formatting import (
     build_role_budget_contract,
@@ -310,10 +310,6 @@ def _dry_run(
 
 
 def main() -> None:
-    from comlrl.runtime import configure_job_cuda_cache
-
-    configure_job_cuda_cache()
-
     parser = argparse.ArgumentParser(
         description="Train MAGRPO on single-turn TravelPlanner collaboration."
     )
@@ -425,8 +421,7 @@ def main() -> None:
             tokenizer.add_special_tokens(model_config.special_tokens)
 
     output_base = str(config.get("output.base_dir", "output_single_turn_magrpo"))
-    job_id = os.environ.get("SLURM_JOB_ID", "no_job_id")
-    output_dir = os.path.join(output_base, f"job_{job_id}")
+    output_dir = os.path.join(output_base, run_id())
     os.makedirs(output_dir, exist_ok=True)
     config.save(os.path.join(output_dir, "config.yaml"))
 

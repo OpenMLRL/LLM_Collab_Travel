@@ -425,8 +425,8 @@ native role generations retain their exact sampled token trajectories. Neither
 path reads `annotated_plan` or `gold_plan`.
 
 For comparator ablations, use BFCL-style names such as
-`travel-marlhf-iter-central-currentcmp-seed42-JOBID` (centralized) and
-`travel-marlhf-iter-currentcmp-seed42-JOBID` (decentralized). Other teacher labels
+`travel-marlhf-iter-central-currentcmp-seed42` (centralized) and
+`travel-marlhf-iter-currentcmp-seed42` (decentralized). Other teacher labels
 are `history1` and the model name. Reserve `current` for the current-data replay
 ablation, not the current-policy comparator; keep the replay setting in config
 and experiment group/tags.
@@ -533,7 +533,7 @@ For non-iterative MADPO/MARLHF omit `mapl.num_iterations`; MARLHF also supports
 updates; an all-tied run exits with an explicit error rather than reporting a
 successful training run. Check the final `preference_pairs` and `env_steps`.
 Each run writes its resolved
-configuration and final actors under a unique job/seed/time output directory;
+configuration and final actors under a unique seed/time output directory;
 iterative preference replay stays in that run directory.
 
 ## Centralized collaboration (independent opt-in entrypoint)
@@ -596,7 +596,7 @@ Outputs, replay and policy checkpoints use a separate, unique run directory.
 Joint replay is explicitly marked and rejects decentralized replay records.
 W&B names include `cenactor`; iterative defaults also include
 `central-currentcmp`, e.g.
-`travel-marlhf-iter-cenactor-central-currentcmp-seed42-<job>`.
+`travel-marlhf-iter-cenactor-central-currentcmp-seed42`.
 Thus `central` alone continues to mean the old **two-actor, central-comparator**
 ablation. Logging keeps the same compact eval/iter/distribution policy (and
 `turn_1` for MAGRPO), without restoring train, eval_full or sample-table panels.
@@ -630,10 +630,5 @@ inputs, and all four training loops, including iterative refresh.
 
 Repository edits are intentionally left uncommitted for review in GitHub
 Desktop. Commit, push, and remote-cluster synchronization happen only when
-explicitly requested. Temporary Slurm scripts and profiling artifacts stay
+explicitly requested. Temporary launch scripts and profiling artifacts stay
 outside this repository.
-
-## Slurm runtime cache
-
-Training launchers isolate unset CUDA JIT caches per job on node-local storage.
-Update CoMLRL alongside this checkout; see the [runtime cache guide](docs/runtime_cache.md).

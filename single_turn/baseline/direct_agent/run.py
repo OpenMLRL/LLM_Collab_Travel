@@ -5,7 +5,6 @@ import argparse
 import dataclasses
 import gc
 import json
-import os
 from pathlib import Path
 import random
 import sys
@@ -95,10 +94,9 @@ class Experiment:
         write_json(self.out / "protocol.json", metadata)
         if cfg.wandb_enabled:
             import wandb
-            job = os.environ.get("SLURM_JOB_ID", "local")
             self.wandb_run = wandb.init(
                 entity=cfg.wandb_entity, project=cfg.wandb_project, group=cfg.group,
-                name=f"travel-direct-{cfg.algorithm}-qwen3-8b-seed{cfg.seed}-{job}",
+                name=f"travel-direct-{cfg.algorithm}-qwen3-8b-seed{cfg.seed}",
                 dir=str(self.out), config=metadata,
                 tags=["single-agent", "direct-answer", "qwen3-8b", cfg.algorithm, "non-thinking"],
             )
@@ -396,10 +394,6 @@ def main(argv=None):
     if args.dry_run:
         print(json.dumps(dict(protocol_metadata(cfg), **manifest), indent=2))
         return
-    # A private cache before the FIRST torch CUDA query; no shared cache mutation.
-    if "SLURM_JOB_ID" in os.environ and not os.environ.get("CUDA_CACHE_PATH"):
-        import tempfile
-        os.environ["CUDA_CACHE_PATH"] = tempfile.mkdtemp(prefix=f"travel-direct-{os.environ['SLURM_JOB_ID']}-")
     out = Path(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=False)
     write_json(out / "config.json", dataclasses.asdict(cfg))

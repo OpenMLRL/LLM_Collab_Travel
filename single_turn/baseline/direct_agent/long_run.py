@@ -2,7 +2,7 @@
 
 The short-run entrypoint and all domain prompts, scores and sampling remain unchanged.
 An epoch is repeated until target_updates; response caps do not terminate this entrypoint.
-Only clean checkpoint-boundary pauses return 85 (for Slurm requeue); errors never do.
+Only clean checkpoint-boundary pauses return 85 (safe to requeue); errors never do.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def restore_rng(state):
 
 
 class SegmentComplete(Exception):
-    """Checkpoint committed; safe for the launcher to requeue this same job."""
+    """Checkpoint committed; safe for the launcher to restart this same run."""
 
 
 class LongExperiment(base.Experiment):
@@ -103,9 +103,8 @@ class LongExperiment(base.Experiment):
                 raise ValueError("Existing output directory belongs to a different experiment")
         else:
             domain = "bfcl" if BFCL else getattr(cfg, "domain", "travel")
-            job = os.environ.get("SLURM_JOB_ID", "local")
             identity = {"protocol_identity": self.identity, "wandb_id": uuid.uuid4().hex[:12],
-                        "run_name": run_name or f"{domain}-direct-{cfg.algorithm}-qwen3-8b-u{target_updates}-seed{cfg.seed}-{job}"}
+                        "run_name": run_name or f"{domain}-direct-{cfg.algorithm}-qwen3-8b-u{target_updates}-seed{cfg.seed}"}
             base.write_json(identity_file, identity)
         metadata = base.protocol_metadata(cfg)
         metadata.update(manifest)
