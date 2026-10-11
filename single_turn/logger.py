@@ -79,12 +79,11 @@ def build_single_turn_eval_logger(
         panel_by_prompt[key] = row_idx // int(panel_size) + 1
 
     def logger(
+        *,
         agent_completions_turns: List[List[List[str]]],
-        test_cases: List[str],
-        entry_points: List[str],
         prompts: List[str] | None = None,
+        **_: Any,
     ) -> List[Dict[str, Any]]:
-        del test_cases, entry_points
         if not agent_completions_turns or prompts is None:
             return []
         metrics: List[Dict[str, Any]] = []

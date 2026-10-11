@@ -1126,9 +1126,7 @@ class LoggerTests(unittest.TestCase):
         outputs = valid_completions()
         logger = build_single_turn_eval_logger([item])
         metrics = logger(
-            [[[outputs[0]]], [[outputs[1]]]],
-            test_cases=[""],
-            entry_points=[""],
+            agent_completions_turns=[[[outputs[0]]], [[outputs[1]]]],
             prompts=[item["prompt"]],
         )
         self.assertEqual(metrics[0]["turn_1/ultimate/collaboration_success"], 1.0)
@@ -1169,9 +1167,7 @@ class LoggerTests(unittest.TestCase):
             [item], reward_config=TravelRewardConfig(), panel_size=4
         )
         metrics = logger(
-            [[[outputs[0]]], [[outputs[1]]]],
-            test_cases=[""],
-            entry_points=[""],
+            agent_completions_turns=[[[outputs[0]]], [[outputs[1]]]],
             prompts=[item["prompt"]],
         )
         aggregate = aggregate_single_turn_metrics(metrics)
@@ -1211,9 +1207,7 @@ class LoggerTests(unittest.TestCase):
         outputs = valid_completions()
         with self.assertRaises(KeyError):
             logger(
-                [[[outputs[0]]], [[outputs[1]]]],
-                test_cases=[""],
-                entry_points=[""],
+                agent_completions_turns=[[[outputs[0]]], [[outputs[1]]]],
                 prompts=["not in the fixed split"],
             )
 
@@ -1234,10 +1228,12 @@ class LoggerTests(unittest.TestCase):
             evaluate_single_turn_response(outputs, batch_item=poisoned),
         )
         plain_metrics = build_single_turn_eval_logger([plain])(
-            [[[outputs[0]]], [[outputs[1]]]], [""], [""], [plain["prompt"]]
+            agent_completions_turns=[[[outputs[0]]], [[outputs[1]]]],
+            prompts=[plain["prompt"]],
         )
         poisoned_metrics = build_single_turn_eval_logger([poisoned])(
-            [[[outputs[0]]], [[outputs[1]]]], [""], [""], [poisoned["prompt"]]
+            agent_completions_turns=[[[outputs[0]]], [[outputs[1]]]],
+            prompts=[poisoned["prompt"]],
         )
         self.assertEqual(plain_metrics, poisoned_metrics)
 

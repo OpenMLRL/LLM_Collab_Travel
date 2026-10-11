@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import fields
-from datetime import datetime
 import json
 from pathlib import Path
 import random
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-for path in (REPO_ROOT.parent / "CoMLRL", REPO_ROOT):
+TASK_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = TASK_ROOT.parent
+COMLRL_ROOT = REPO_ROOT.parent / "CoMLRL"
+for path in (COMLRL_ROOT, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from single_turn.config import Config, add_config_args, parse_overrides
+from single_turn.config import Config, add_config_args, parse_overrides, run_id
 from single_turn.train.train_magrpo import (
     _agent_names, _bool, _build_reward_processor, _contract_probe_completions,
     _load_data, _wandb_config,
@@ -117,7 +118,7 @@ def main(default_algorithm=None):
     parser.add_argument("--dry-run", action="store_true", help="Validate data/reward/config without loading model weights.")
     cli = parser.parse_args()
     algorithm = cli.algorithm or "madpo_iter"
-    path = cli.config or REPO_ROOT / "single_turn" / "configs" / f"single_turn_{algorithm}_config.yaml"
+    path = cli.config or TASK_ROOT / "configs" / f"single_turn_{algorithm}_config.yaml"
     config = load_config(path)
     config.update(parse_overrides(cli.override))
     if cli.algorithm and config.get("algorithm") != cli.algorithm:
@@ -165,8 +166,7 @@ def main(default_algorithm=None):
             tokenizer.pad_token = tokenizer.eos_token
         if model.special_tokens:
             tokenizer.add_special_tokens(model.special_tokens)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    output = Path(config.get("output.base_dir")) / f"seed{seed}_{stamp}"
+    output = Path(config.get("output.base_dir")) / run_id()
     output.mkdir(parents=True, exist_ok=False)
     if hasattr(args, "preference_replay_dir") and args.preference_replay_dir is None:
         args.preference_replay_dir = str(output / "preference_replay")
@@ -183,7 +183,7 @@ def main(default_algorithm=None):
         agent_model=model.name if names is None else None, agents=names, num_agents=2,
         tokenizer=tokenizers, model_config={"torch_dtype": model.torch_dtype,
             "attn_implementation": model.attn_implementation, "special_tokens": model.special_tokens},
-        train_dataset=train_rows, eval_dataset=eval_rows, dataset_type="travelplanner",
+        train_dataset=train_rows, eval_dataset=eval_rows,
         reward_func=reward, reward_processor=_build_reward_processor(config),
         formatters=get_single_turn_formatters(num_agents=2, role_mode="partitioned_roles",
             force_json_prefix=True, tokenizers=tokenizers, use_chat_template=True,

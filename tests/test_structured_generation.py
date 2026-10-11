@@ -484,8 +484,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         ):
             metrics = trainer._log_eval_metrics(
                 all_agent_completions_turns=[[["a0"]], [["a1"]]],
-                all_test_cases=[""],
-                all_entry_points=[""],
+                all_batch_items=[{"prompt": "prompt"}],
                 all_prompts=["prompt"],
                 extra_metrics={"eval/turn_1/reward_mean": 0.75},
             )
@@ -541,8 +540,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         ):
             metrics = trainer._log_eval_metrics(
                 all_agent_completions_turns=[[["a0"]], [["a1"]]],
-                all_test_cases=[""],
-                all_entry_points=[""],
+                all_batch_items=[{"prompt": "prompt"}],
                 all_prompts=["prompt"],
                 extra_metrics={
                     "eval/turn_1/reward_mean": 0.8,

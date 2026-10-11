@@ -11,6 +11,25 @@ are removed during data normalization and are never used by the prompt, reward,
 or evaluation logger. Any itinerary can succeed if it is grounded and satisfies
 the explicit constraints.
 
+## Installation
+
+Install [CoMLRL](https://github.com/OpenMLRL/CoMLRL):
+
+```bash
+pip install comlrl
+# Install PyTorch compatible with your device
+```
+
+Or via conda-forge:
+
+```bash
+conda install -c conda-forge comlrl
+# Install PyTorch compatible with your device
+```
+
+A `CoMLRL/` checkout next to this repository takes precedence over the
+installed package, so local CoMLRL changes are used without reinstalling.
+
 ## Curriculum data
 
 The default run uses the 180-row TravelPlanner `validation` configuration as a
@@ -334,16 +353,8 @@ until results are separately run through the official database evaluator.
 
 ## Run
 
-Expected directory layout:
-
-```text
-GitHub/
-  CoMLRL/
-  LLM_Collab_Travel/
-```
-
-After activating the environment, verify the actual split, prompts, reference
-catalog, reward range, and 5040-step budget without loading a model:
+Verify the actual split, prompts, reference catalog, reward range, and
+5040-step budget without loading a model:
 
 ```bash
 cd /path/to/GitHub/LLM_Collab_Travel
@@ -533,8 +544,8 @@ For non-iterative MADPO/MARLHF omit `mapl.num_iterations`; MARLHF also supports
 updates; an all-tied run exits with an explicit error rather than reporting a
 successful training run. Check the final `preference_pairs` and `env_steps`.
 Each run writes its resolved
-configuration and final actors under a unique seed/time output directory;
-iterative preference replay stays in that run directory.
+configuration and final actors under a unique `<output.base_dir>/<run_id>`
+directory; iterative preference replay stays in that run directory.
 
 ## Centralized collaboration (independent opt-in entrypoint)
 
@@ -549,12 +560,9 @@ Use `single_turn/train/train_centralized.py`, with `--algorithm` set to `magrpo`
 `single_turn_centralized_<algorithm>_config.yaml`. No existing entrypoint or
 default configuration switches to centralized training automatically.
 
-The new entrypoint requires CoMLRL's centralized actor APIs, as in CoMLRL `cen`
-commit `998ea13` (or a revision containing it). The conventional sibling CoMLRL
-checkout is used by default. To keep an older core used by other jobs untouched,
-point **only this entrypoint** at a separate checkout using
-`TRAVEL_COMLRL_ROOT=/absolute/path/to/isolated/CoMLRL`. An older incompatible core
-fails before loading models; it never silently falls back to two actors.
+The entrypoint requires a CoMLRL version with the centralized actor APIs. An
+older incompatible CoMLRL fails before loading models; it never silently falls
+back to two actors.
 
 ```bash
 # Data / joint-output / reward checks, without model weights.

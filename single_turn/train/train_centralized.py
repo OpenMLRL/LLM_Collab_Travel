@@ -8,33 +8,24 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import fields
-from datetime import datetime
 import json
-import os
 from pathlib import Path
 import random
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-for path in (REPO_ROOT.parent / "CoMLRL", REPO_ROOT):
+TASK_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = TASK_ROOT.parent
+COMLRL_ROOT = REPO_ROOT.parent / "CoMLRL"
+for path in (COMLRL_ROOT, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from single_turn.config import Config, add_config_args, parse_overrides
+from single_turn.config import Config, add_config_args, parse_overrides, run_id
 from single_turn.train.train_magrpo import (
     _agent_names, _bool, _build_reward_processor, _curriculum_plan, _load_data,
     _wandb_config,
 )
 from single_turn.train.train_mapl import budget_report, make_trainer_args as mapl_args
-
-# The shared helpers above locate the conventional sibling CoMLRL checkout.
-# An explicit isolated core checkout takes precedence for this NEW entrypoint
-# only; existing entrypoints keep their original dependency resolution.
-if os.environ.get("TRAVEL_COMLRL_ROOT"):
-    core_root = Path(os.environ["TRAVEL_COMLRL_ROOT"]).expanduser().resolve()
-    if not (core_root / "comlrl").is_dir():
-        raise ValueError("TRAVEL_COMLRL_ROOT must contain the comlrl package.")
-    sys.path.insert(0, str(core_root))
 
 ALGORITHMS = ("magrpo", "madpo", "madpo_iter", "marlhf", "marlhf_iter")
 MAGRPO_EVAL_SETTINGS = {"eval_at_end", "final_eval_num_samples", "rotate_eval_subset"}
@@ -62,9 +53,8 @@ def make_trainer_args(config):
             raise ImportError("CoMLRL is missing centralized preference actors")
     except ImportError as exc:
         raise RuntimeError(
-            "The centralized entrypoint requires CoMLRL's centralized actor APIs "
-            "(cen commit 998ea13 or a revision containing it). Use a separate "
-            "CoMLRL checkout/environment; do not switch a running job's source."
+            "The centralized entrypoint requires a CoMLRL version with the "
+            "centralized actor APIs."
         ) from exc
     algorithm = config.get("algorithm")
     if algorithm not in ALGORITHMS:
@@ -119,7 +109,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Check data, joint contract and reward without loading weights.")
     cli = parser.parse_args()
     algorithm = cli.algorithm or "marlhf_iter"
-    config = load_config(cli.config or REPO_ROOT / "single_turn/configs" / f"single_turn_centralized_{algorithm}_config.yaml")
+    config = load_config(cli.config or TASK_ROOT / "configs" / f"single_turn_centralized_{algorithm}_config.yaml")
     overrides = parse_overrides(cli.override)
     config.update(overrides)
     if cli.algorithm and config.get("algorithm") != cli.algorithm:
@@ -196,8 +186,7 @@ def main():
         tokenizer.add_special_tokens(model.special_tokens)
     if config.get("tokenizer.padding_side"):
         tokenizer.padding_side = str(config.get("tokenizer.padding_side"))
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    output = Path(config.get("output.base_dir")) / f"seed{seed}_{stamp}"
+    output = Path(config.get("output.base_dir")) / run_id()
     output.mkdir(parents=True, exist_ok=False)
     if hasattr(args, "preference_replay_dir") and args.preference_replay_dir is None:
         args.preference_replay_dir = str(output / "preference_replay")
@@ -230,7 +219,7 @@ def main():
         agent_model=model.name if names is None else None, agents=names, num_agents=2,
         tokenizer=tokenizer, model_config={"torch_dtype": model.torch_dtype,
             "attn_implementation": model.attn_implementation, "special_tokens": model.special_tokens},
-        train_dataset=train_rows, eval_dataset=eval_rows, dataset_type="travelplanner",
+        train_dataset=train_rows, eval_dataset=eval_rows,
         reward_func=reward, reward_processor=_build_reward_processor(config),
         formatters=get_single_turn_formatters(num_agents=2, use_chat_template=False),
         args=args, wandb_config=wandb_config,

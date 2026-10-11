@@ -102,7 +102,7 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
     if not _bool(section.get("enabled", True), default=True):
         return None
     return {
-        "project": section.get("project", "travelplanner-collab"),
+        "project": section.get("project"),
         "entity": section.get("entity", "OpenMLRL"),
         "name": section.get("name", "single_turn_magrpo"),
         "dir": section.get("dir", output_dir),
@@ -491,7 +491,6 @@ def main() -> None:
         },
         train_dataset=train_rows,
         eval_dataset=eval_rows,
-        dataset_type="travelplanner",
         reward_func=reward,
         reward_processor=_build_reward_processor(config),
         formatters=formatters,

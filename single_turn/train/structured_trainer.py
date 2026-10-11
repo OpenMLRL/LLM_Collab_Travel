@@ -423,8 +423,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
     def _log_eval_metrics(
         self,
         all_agent_completions_turns: Any,
-        all_test_cases: Any,
-        all_entry_points: Any,
+        all_batch_items: Any,
         all_prompts: Any,
         extra_metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -440,8 +439,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         ):
             detailed = self.eval_logger(
                 agent_completions_turns=all_agent_completions_turns,
-                test_cases=all_test_cases,
-                entry_points=all_entry_points,
+                batch_items=all_batch_items,
                 prompts=all_prompts,
             )
             anchor_size = int(getattr(self.args, "eval_num_samples", len(detailed)))
