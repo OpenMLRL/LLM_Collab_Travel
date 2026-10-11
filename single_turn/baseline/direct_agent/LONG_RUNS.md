@@ -28,4 +28,3 @@ Initial/final full evaluation is not interrupted; leave enough margin for it.
 Regression tests compare original RLHF trajectories and exact CPU continuation
 across preference collection, RM fitting and actor updates; they also cover the
 existing direct algorithms. Changing hardware can cause floating-point variation.
-

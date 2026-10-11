@@ -156,9 +156,7 @@ def five_day_fixture_item():
     ):
         records.append(
             {
-                "Description": (
-                    f"Flight from {origin} to {destination} on {date}"
-                ),
+                "Description": (f"Flight from {origin} to {destination} on {date}"),
                 "Content": (
                     "Flight Number Price DepTime ArrTime ActualElapsedTime "
                     "FlightDate OriginCityName DestCityName Distance\n"
@@ -360,9 +358,7 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(len(catalog.transportation), 2)
 
     def test_shared_hard_constraint_and_party_cost_helpers(self):
-        restaurant = CatalogEntry(
-            category="restaurant", name="Cafe", cost=10
-        )
+        restaurant = CatalogEntry(category="restaurant", name="Cafe", cost=10)
         flight = CatalogEntry(
             category="transportation", name="F1", cost=10, mode="flight"
         )
@@ -389,26 +385,16 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(scaled_party_cost(taxi, 7), 20.0)
         self.assertEqual(scaled_party_cost(drive, 7), 20.0)
         self.assertEqual(scaled_party_cost(private_room, 7), 30.0)
-        self.assertTrue(
-            accommodation_satisfies_room_type(private_room, "Private room")
-        )
+        self.assertTrue(accommodation_satisfies_room_type(private_room, "Private room"))
         self.assertTrue(
             accommodation_satisfies_room_type(private_room, "not shared room")
         )
-        self.assertFalse(
-            accommodation_satisfies_room_type(private_room, "entire room")
-        )
-        self.assertFalse(
-            accommodation_satisfies_house_rule(private_room, "parties")
-        )
-        self.assertTrue(
-            accommodation_satisfies_house_rule(private_room, "smoking")
-        )
+        self.assertFalse(accommodation_satisfies_room_type(private_room, "entire room"))
+        self.assertFalse(accommodation_satisfies_house_rule(private_room, "parties"))
+        self.assertTrue(accommodation_satisfies_house_rule(private_room, "smoking"))
         self.assertFalse(transportation_satisfies_rule(flight, "no flight"))
         self.assertTrue(transportation_satisfies_rule(taxi, "no flight"))
-        self.assertFalse(
-            transportation_satisfies_rule(drive, "no self-driving")
-        )
+        self.assertFalse(transportation_satisfies_rule(drive, "no self-driving"))
 
     def test_terminal_hard_constraint_checks_remain_strict(self):
         room_item = fixture_item()
@@ -448,9 +434,7 @@ class ReferenceRewardTests(unittest.TestCase):
         _, forbidden_transport = score_single_turn_response(
             valid_completions(), batch_item=transport_item
         )
-        self.assertEqual(
-            forbidden_transport["hard_pass/transportation"], 0.0
-        )
+        self.assertEqual(forbidden_transport["hard_pass/transportation"], 0.0)
 
     def test_valid_plan_reaches_maximum_without_gold(self):
         reward, detail = score_single_turn_response(
@@ -489,15 +473,9 @@ class ReferenceRewardTests(unittest.TestCase):
         _, unknown_meal = score_single_turn_response(
             completions_from_values(values), batch_item=exact_budget
         )
-        self.assertAlmostEqual(
-            unknown_meal["required_cost_completeness"], 6.0 / 7.0
-        )
-        self.assertAlmostEqual(
-            unknown_meal["required_grounded_recall"], 10.0 / 11.0
-        )
-        self.assertAlmostEqual(
-            unknown_meal["budget_constraint_soft"], 60.0 / 77.0
-        )
+        self.assertAlmostEqual(unknown_meal["required_cost_completeness"], 6.0 / 7.0)
+        self.assertAlmostEqual(unknown_meal["required_grounded_recall"], 10.0 / 11.0)
+        self.assertAlmostEqual(unknown_meal["budget_constraint_soft"], 60.0 / 77.0)
         self.assertGreater(unknown_meal["budget_constraint_soft"], 0.0)
         self.assertEqual(unknown_meal["cost_complete"], 0.0)
         self.assertEqual(unknown_meal["ultimate/reference_budget_pass"], 0.0)
@@ -512,9 +490,7 @@ class ReferenceRewardTests(unittest.TestCase):
             unknown_attraction["budget_constraint_soft"], 10.0 / 11.0
         )
         self.assertEqual(unknown_attraction["cost_complete"], 0.0)
-        self.assertEqual(
-            unknown_attraction["ultimate/reference_budget_pass"], 0.0
-        )
+        self.assertEqual(unknown_attraction["ultimate/reference_budget_pass"], 0.0)
 
         # Optional travel-day cost slots are not part of the required-plan
         # denominator. If the model nevertheless emits one, it must be costed
@@ -524,9 +500,7 @@ class ReferenceRewardTests(unittest.TestCase):
         _, unknown_optional_cost = score_single_turn_response(
             completions_from_values(values), batch_item=exact_budget
         )
-        self.assertEqual(
-            unknown_optional_cost["required_cost_completeness"], 1.0
-        )
+        self.assertEqual(unknown_optional_cost["required_cost_completeness"], 1.0)
         self.assertAlmostEqual(
             unknown_optional_cost["budget_cost_completeness"], 7.0 / 8.0
         )
@@ -534,9 +508,7 @@ class ReferenceRewardTests(unittest.TestCase):
             unknown_optional_cost["budget_constraint_soft"], 7.0 / 8.0
         )
         self.assertEqual(unknown_optional_cost["cost_complete"], 0.0)
-        self.assertEqual(
-            unknown_optional_cost["ultimate/reference_budget_pass"], 0.0
-        )
+        self.assertEqual(unknown_optional_cost["ultimate/reference_budget_pass"], 0.0)
 
     def test_budget_margin_penalizes_overage_continuously(self):
         expected = ((290, 1.0, 1.0), (250, 0.84, 0.0), (145, 0.0, 0.0))
@@ -641,9 +613,7 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(missing_required["assignment_coverage"], 1.0)
         self.assertLess(missing_required["required_fill_rate"], 1.0)
         self.assertEqual(missing_required["ultimate/reference_plan_delivery"], 1.0)
-        self.assertEqual(
-            missing_required["ultimate/required_plan_completion"], 0.0
-        )
+        self.assertEqual(missing_required["ultimate/required_plan_completion"], 0.0)
 
     def test_wrong_route_and_lazy_agent_are_penalized(self):
         values = valid_plan_values()
@@ -741,9 +711,7 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(detail["ultimate/reference_grounding"], 0.0)
         self.assertEqual(detail["shaping/quoted_grounded_count"], 1.0)
         self.assertGreater(detail["reward_component/recovered_semantic"], 0.0)
-        self.assertLessEqual(
-            detail["reward_component/recovered_semantic"], 0.03
-        )
+        self.assertLessEqual(detail["reward_component/recovered_semantic"], 0.03)
         self.assertEqual(detail["reward_component/strict_quality"], 0.0)
 
         repeated = malformed.replace(
@@ -766,10 +734,7 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertEqual(bare_detail["shaping/quoted_grounding_score"], 0.0)
 
     def test_detached_value_spam_cannot_earn_grounding(self):
-        spam = (
-            '{"value":"Cafe, Beta","value":"Diner, Beta",'
-            '"value":"Museum, Beta"}'
-        )
+        spam = '{"value":"Cafe, Beta","value":"Diner, Beta",' '"value":"Museum, Beta"}'
         reward, detail = score_single_turn_response(
             [spam, ""], batch_item=fixture_item()
         )
@@ -874,12 +839,8 @@ class ReferenceRewardTests(unittest.TestCase):
         self.assertLessEqual(both_reward, 0.05)
         self.assertEqual(one_detail["ultimate/team_action_success"], 0.0)
         self.assertEqual(both_detail["action_validity"], 0.0)
-        self.assertLessEqual(
-            one_detail["reward_component/recovered_semantic"], 0.03
-        )
-        self.assertLessEqual(
-            both_detail["reward_component/recovered_semantic"], 0.03
-        )
+        self.assertLessEqual(one_detail["reward_component/recovered_semantic"], 0.03)
+        self.assertLessEqual(both_detail["reward_component/recovered_semantic"], 0.03)
 
     def test_strict_all_dash_agent_cannot_free_ride_on_either_role(self):
         outputs = valid_completions()
@@ -898,9 +859,7 @@ class ReferenceRewardTests(unittest.TestCase):
                 detail[f"agent_{lazy_agent}/required_grounded_contribution"],
                 0.0,
             )
-            self.assertLessEqual(
-                detail["required_cooperative_contribution"], 0.10
-            )
+            self.assertLessEqual(detail["required_cooperative_contribution"], 0.10)
             self.assertLess(reward, 0.30)
 
     def test_self_loop_cannot_erase_experience_role_requirements(self):
@@ -913,37 +872,23 @@ class ReferenceRewardTests(unittest.TestCase):
             row["value"] = "-"
         outputs[1] = json.dumps(lazy_experience)
 
-        reward, detail = score_single_turn_response(
-            outputs, batch_item=fixture_item()
-        )
+        reward, detail = score_single_turn_response(outputs, batch_item=fixture_item())
 
         self.assertLess(detail["route_parse_rate"], 1.0)
-        self.assertEqual(
-            detail["agent_1/required_grounded_contribution"], 0.0
-        )
+        self.assertEqual(detail["agent_1/required_grounded_contribution"], 0.0)
         self.assertLess(reward, 0.25)
 
     def test_empty_required_role_is_zero_contribution_not_vacuous_success(self):
-        values = {
-            (day, field): "-"
-            for day in range(1, 4)
-            for field in PLAN_FIELDS
-        }
+        values = {(day, field): "-" for day in range(1, 4) for field in PLAN_FIELDS}
         values.update(
             {
                 (1, "current_city"): "from Alpha to Beta",
-                (1, "transportation"): (
-                    "Flight Number: F100, from Alpha to Beta"
-                ),
+                (1, "transportation"): ("Flight Number: F100, from Alpha to Beta"),
                 (1, "accommodation"): "Hotel, Beta",
                 (2, "current_city"): "from Beta to Alpha",
-                (2, "transportation"): (
-                    "Flight Number: F200, from Beta to Alpha"
-                ),
+                (2, "transportation"): ("Flight Number: F200, from Beta to Alpha"),
                 (3, "current_city"): "from Alpha to Beta",
-                (3, "transportation"): (
-                    "Flight Number: F100, from Alpha to Beta"
-                ),
+                (3, "transportation"): ("Flight Number: F100, from Alpha to Beta"),
             }
         )
 
@@ -951,23 +896,15 @@ class ReferenceRewardTests(unittest.TestCase):
             completions_from_values(values), batch_item=fixture_item()
         )
 
-        self.assertEqual(
-            detail["agent_1/required_grounded_contribution"], 0.0
-        )
+        self.assertEqual(detail["agent_1/required_grounded_contribution"], 0.0)
         self.assertLess(reward, 0.25)
 
     def test_logistics_agent_cannot_shrink_teammate_work_with_extra_moves(self):
-        values = {
-            (day, field): "-"
-            for day in range(1, 6)
-            for field in PLAN_FIELDS
-        }
+        values = {(day, field): "-" for day in range(1, 6) for field in PLAN_FIELDS}
         values.update(
             {
                 (1, "current_city"): "from Alpha to Beta",
-                (1, "transportation"): (
-                    "Flight Number: F100, from Alpha to Beta"
-                ),
+                (1, "transportation"): ("Flight Number: F100, from Alpha to Beta"),
                 (1, "accommodation"): "Hotel-Beta, Beta",
                 (2, "current_city"): "Beta",
                 (2, "breakfast"): "Cafe-Beta, Beta",
@@ -976,9 +913,7 @@ class ReferenceRewardTests(unittest.TestCase):
                 (2, "dinner"): "Bistro-Beta, Beta",
                 (2, "accommodation"): "Hotel-Beta, Beta",
                 (3, "current_city"): "from Beta to Gamma",
-                (3, "transportation"): (
-                    "Flight Number: F200, from Beta to Gamma"
-                ),
+                (3, "transportation"): ("Flight Number: F200, from Beta to Gamma"),
                 (3, "accommodation"): "Hotel-Gamma, Gamma",
                 (4, "current_city"): "Gamma",
                 # Agent 1 uses grounded but wrong-city entities on the second
@@ -991,9 +926,7 @@ class ReferenceRewardTests(unittest.TestCase):
                 (4, "dinner"): "Bistro-Gamma, Gamma",
                 (4, "accommodation"): "Hotel-Gamma, Gamma",
                 (5, "current_city"): "from Gamma to Alpha",
-                (5, "transportation"): (
-                    "Flight Number: F300, from Gamma to Alpha"
-                ),
+                (5, "transportation"): ("Flight Number: F300, from Gamma to Alpha"),
             }
         )
         honest_outputs = completions_from_values(values, days=5)
@@ -1111,9 +1044,7 @@ class ReferenceRewardTests(unittest.TestCase):
         )
         self.assertEqual(rewards, [1.0])
         self.assertEqual(reward_model.last_details[0]["reward"], 1.0)
-        self.assertEqual(
-            reward_model.last_details[0]["unclamped_reward"], 1.0
-        )
+        self.assertEqual(reward_model.last_details[0]["unclamped_reward"], 1.0)
         pending = reward_model.drain_details()
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["reward"], 1.0)
@@ -1130,9 +1061,7 @@ class LoggerTests(unittest.TestCase):
             prompts=[item["prompt"]],
         )
         self.assertEqual(metrics[0]["turn_1/ultimate/collaboration_success"], 1.0)
-        self.assertEqual(
-            metrics[0]["turn_1/ultimate/reference_commonsense_micro"], 1.0
-        )
+        self.assertEqual(metrics[0]["turn_1/ultimate/reference_commonsense_micro"], 1.0)
         public_keys = {
             key
             for key in metrics[0]
@@ -1410,16 +1339,24 @@ class DataAndPromptTests(unittest.TestCase):
             formatter(item) for formatter in get_single_turn_formatters(num_agents=2)
         ]
         hotel_line = next(
-            line for line in logistics.splitlines() if line.startswith('- "Hotel, Beta"')
+            line
+            for line in logistics.splitlines()
+            if line.startswith('- "Hotel, Beta"')
         )
         motel_line = next(
-            line for line in logistics.splitlines() if line.startswith('- "Motel, Beta"')
+            line
+            for line in logistics.splitlines()
+            if line.startswith('- "Motel, Beta"')
         )
         cafe_line = next(
-            line for line in experience.splitlines() if line.startswith('- "Cafe, Beta"')
+            line
+            for line in experience.splitlines()
+            if line.startswith('- "Cafe, Beta"')
         )
         diner_line = next(
-            line for line in experience.splitlines() if line.startswith('- "Diner, Beta"')
+            line
+            for line in experience.splitlines()
+            if line.startswith('- "Diner, Beta"')
         )
         self.assertIn("room=Private room", hotel_line)
         self.assertIn("eligible=yes", hotel_line)
@@ -1448,10 +1385,14 @@ class DataAndPromptTests(unittest.TestCase):
         item["reference_records"] = []
         logistics = get_single_turn_formatters(num_agents=2)[0](item)
         hotel_line = next(
-            line for line in logistics.splitlines() if line.startswith('- "Hotel, Beta"')
+            line
+            for line in logistics.splitlines()
+            if line.startswith('- "Hotel, Beta"')
         )
         motel_line = next(
-            line for line in logistics.splitlines() if line.startswith('- "Motel, Beta"')
+            line
+            for line in logistics.splitlines()
+            if line.startswith('- "Motel, Beta"')
         )
         self.assertIn("days=1,2", hotel_line)
         self.assertIn("eligible=yes", hotel_line)
@@ -1521,15 +1462,11 @@ class DataAndPromptTests(unittest.TestCase):
             '"Flight Number: F100, from Alpha to Beta" | team_cost=20.00',
             logistics,
         )
-        self.assertIn(
-            '"Hotel, Beta" | team_cost_per_night=100.00', logistics
-        )
+        self.assertIn('"Hotel, Beta" | team_cost_per_night=100.00', logistics)
         self.assertNotIn('"Cafe, Beta" | team_cost_per_meal=10.00', logistics)
         self.assertNotIn("Museum, Beta", logistics)
 
-        self.assertIn(
-            '"Cafe, Beta" | team_cost_per_meal=10.00', experience
-        )
+        self.assertIn('"Cafe, Beta" | team_cost_per_meal=10.00', experience)
         self.assertIn('"Museum, Beta"', experience)
         self.assertNotIn("Hotel, Beta", experience)
         self.assertNotIn("Flight Number: F100", experience)
@@ -1645,9 +1582,7 @@ class DataAndPromptTests(unittest.TestCase):
             self.assertIn(expected, logistics_scaffold)
 
     def test_prompt_and_generation_prefix_start_first_owned_value(self):
-        prefixes = [
-            build_agent_json_prefill(agent_idx, 3) for agent_idx in range(2)
-        ]
+        prefixes = [build_agent_json_prefill(agent_idx, 3) for agent_idx in range(2)]
         self.assertEqual(
             prefixes[0],
             '{"agent_id": 0, "assignments": [{"day": 1, '
@@ -1677,9 +1612,7 @@ class DataAndPromptTests(unittest.TestCase):
         for agent_idx, prompt in enumerate(prompts):
             self.assertNotIn("already supplied", prompt)
             self.assertNotIn("already-open value string", prompt)
-            self.assertIn(
-                f'{{"agent_id": {agent_idx}, "assignments": [', prompt
-            )
+            self.assertIn(f'{{"agent_id": {agent_idx}, "assignments": [', prompt)
             self.assertIn('first generated character must be "{"', prompt)
 
 

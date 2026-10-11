@@ -32,8 +32,8 @@ from single_turn.rewards.reference_evaluator import (
 )
 
 
-_QUOTED = r'''(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')'''
-_KEY = r'''(?:"{name}"|'{name}'|{name})'''
+_QUOTED = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
+_KEY = r"""(?:"{name}"|'{name}'|{name})"""
 _TRIPLE_RE = re.compile(
     _KEY.format(name="day")
     + r"\s*:\s*(?P<day>\d+)\s*,\s*"
@@ -180,9 +180,7 @@ def _agent_recovery(
         # evaluation still rejects the whole over-capacity action.
         accepted.setdefault(slot, value)
 
-    overflow_rate = max(0, raw_candidate_count - capacity) / max(
-        1, raw_candidate_count
-    )
+    overflow_rate = max(0, raw_candidate_count - capacity) / max(1, raw_candidate_count)
     rejected_rate = max(0, raw_candidate_count - len(accepted)) / max(
         1, raw_candidate_count
     )
@@ -326,9 +324,7 @@ def _recovered_grounding(
     precision = grounded_count / useful_count if useful_count else 0.0
     progress = min(1.0, len(unique_grounded) / target)
     return {
-        "quoted_value_count": float(
-            sum(len(assignments) for assignments in recovered)
-        ),
+        "quoted_value_count": float(sum(len(assignments) for assignments in recovered)),
         "quoted_useful_value_count": float(useful_count),
         "quoted_grounded_count": float(grounded_count),
         "quoted_unique_grounded_count": float(len(unique_grounded)),
@@ -445,10 +441,6 @@ def build_reward_shaping_surface(
         details[f"agent_{agent_idx}/recovered_owned_coverage"] = float(
             coverages[agent_idx]
         )
-        details[f"agent_{agent_idx}/reference_copy_rate"] = float(
-            copy_rates[agent_idx]
-        )
-        details[f"agent_{agent_idx}/overlong_rate"] = float(
-            overlong_rates[agent_idx]
-        )
+        details[f"agent_{agent_idx}/reference_copy_rate"] = float(copy_rates[agent_idx])
+        details[f"agent_{agent_idx}/overlong_rate"] = float(overlong_rates[agent_idx])
     return RewardShapingSurface(recovered_merge=recovered_merge, details=details)

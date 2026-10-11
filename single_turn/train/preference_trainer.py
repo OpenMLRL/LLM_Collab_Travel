@@ -19,7 +19,12 @@ import torch.nn.functional as F
 import wandb
 from transformers import AutoModel, AutoTokenizer
 
-from comlrl.trainers.preference import MADPOTrainer, MADPOIterTrainer, MARLHFIterTrainer, MARLHFTrainer
+from comlrl.trainers.preference import (
+    MADPOTrainer,
+    MADPOIterTrainer,
+    MARLHFIterTrainer,
+    MARLHFTrainer,
+)
 from comlrl.trainers.preference.madpo import AgentPreferenceTensors, PreferencePair
 from comlrl.utils.distributed import unwrap_model
 from comlrl.utils.tokenizer_utils import ensure_pad_token
@@ -51,8 +56,11 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
     """Share Travel generation, compact eval/iteration logs, and GPU residency."""
 
     def __init__(
-        self, *args, preference_generation_batch_size: int = 20,
-        offload_inactive_actors: bool = True, **kwargs,
+        self,
+        *args,
+        preference_generation_batch_size: int = 20,
+        offload_inactive_actors: bool = True,
+        **kwargs,
     ):
         self.preference_generation_batch_size = int(preference_generation_batch_size)
         if self.preference_generation_batch_size < 1:
@@ -65,10 +73,17 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if self.args.parallel_training != "none":
             raise ValueError("Travel MAPL currently requires parallel_training=none.")
         if self.curriculum_short_epochs:
-            raise ValueError("Travel MAPL uses the full split; curriculum_short_epochs must be 0.")
+            raise ValueError(
+                "Travel MAPL uses the full split; curriculum_short_epochs must be 0."
+            )
         for actor in self.agents:
-            if any(isinstance(module, nn.Dropout) and module.p for module in actor.modules()):
-                raise ValueError("Travel's memory-bounded DPO requires dropout=0 (as in Qwen3).")
+            if any(
+                isinstance(module, nn.Dropout) and module.p
+                for module in actor.modules()
+            ):
+                raise ValueError(
+                    "Travel's memory-bounded DPO requires dropout=0 (as in Qwen3)."
+                )
 
     def train(self, **kwargs):
         # Preference trainers own their refresh/optimization loops. The
@@ -78,14 +93,18 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             self.evaluate(num_eval_samples=int(self.args.eval_num_samples))
         result = self._train_preference_algorithm(**kwargs)
         if self.preference_pairs_generated == 0:
-            raise RuntimeError("No non-tied Travel preferences were generated; no training occurred. Increase preference_num_candidates or inspect the candidate rewards.")
+            raise RuntimeError(
+                "No non-tied Travel preferences were generated; no training occurred. Increase preference_num_candidates or inspect the candidate rewards."
+            )
         return result
 
     def evaluate(self, num_eval_samples=None):
         # The offline preference/RM phases do not change actors. CoMLRL also
         # evaluates at the start of online training, so reuse that identical
         # baseline instead of emitting a second W&B write at env_step=0.
-        count = self.args.eval_num_samples if num_eval_samples is None else num_eval_samples
+        count = (
+            self.args.eval_num_samples if num_eval_samples is None else num_eval_samples
+        )
         key = (int(self.env_step), int(count))
         if getattr(self, "_travel_last_eval_key", None) == key:
             return dict(self._travel_last_eval_metrics)
@@ -95,22 +114,40 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         return metrics
 
     def _generate_completions(
-        self, agent, batch_items, agent_idx=0, num_return_sequences=1,
-        max_new_tokens=128, **kwargs,
+        self,
+        agent,
+        batch_items,
+        agent_idx=0,
+        num_return_sequences=1,
+        max_new_tokens=128,
+        **kwargs,
     ):
         if len(batch_items) != 1:
             raise ValueError("Travel MAPL generation requires one prompt at a time.")
         result = None
-        for start in range(0, num_return_sequences, self.preference_generation_batch_size):
-            count = min(self.preference_generation_batch_size, num_return_sequences - start)
+        for start in range(
+            0, num_return_sequences, self.preference_generation_batch_size
+        ):
+            count = min(
+                self.preference_generation_batch_size, num_return_sequences - start
+            )
             chunk = super()._generate_completions(
-                agent, batch_items, agent_idx=agent_idx,
-                num_return_sequences=count, max_new_tokens=max_new_tokens, **kwargs,
+                agent,
+                batch_items,
+                agent_idx=agent_idx,
+                num_return_sequences=count,
+                max_new_tokens=max_new_tokens,
+                **kwargs,
             )
             if result is None:
                 result = chunk
             else:
-                for key in ("completions", "completion_input_ids", "completion_attention_mask", "completion_loss_mask"):
+                for key in (
+                    "completions",
+                    "completion_input_ids",
+                    "completion_attention_mask",
+                    "completion_loss_mask",
+                ):
                     result[key][0].extend(chunk[key][0])
                 result["response_lens"].extend(chunk["response_lens"])
                 result["reference_kls"].extend(chunk.get("reference_kls", []))
@@ -119,7 +156,8 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if self._preference_trajectories is not None:
             prompt = result["prompts"][0]
             for text, tokens, mask in zip(
-                result["completions"][0], result["completion_input_ids"][0],
+                result["completions"][0],
+                result["completion_input_ids"][0],
                 result["completion_loss_mask"][0],
             ):
                 # Generation includes the assistant prefill in the prompt but
@@ -127,20 +165,29 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
                 # full text again as a continuation (it duplicates the prefix).
                 self._preference_trajectories[(agent_idx, prompt, text)] = (
                     result["prompt_input_ids"][0].detach().cpu().clone(),
-                    tokens.detach().cpu().clone(), mask.detach().cpu().clone(),
+                    tokens.detach().cpu().clone(),
+                    mask.detach().cpu().clone(),
                 )
             if agent_idx == 0:
                 self.preference_joint_candidates += num_return_sequences
         return result
 
-    def _preference_tensors_from_text(self, agent_idx, prompt, winner_completion, loser_completion):
+    def _preference_tensors_from_text(
+        self, agent_idx, prompt, winner_completion, loser_completion
+    ):
         if self._preference_trajectories is None:
-            raise ValueError("Travel preferences require recorded generation tokens and masks.")
+            raise ValueError(
+                "Travel preferences require recorded generation tokens and masks."
+            )
         winner = self._preference_trajectories[(agent_idx, prompt, winner_completion)]
         loser = self._preference_trajectories[(agent_idx, prompt, loser_completion)]
         if not torch.equal(winner[0], loser[0]):
-            raise ValueError("Travel preference candidates must use the same role prompt.")
-        return TravelPreferenceTensors(winner[0], winner[1], loser[1], winner[2], loser[2])
+            raise ValueError(
+                "Travel preference candidates must use the same role prompt."
+            )
+        return TravelPreferenceTensors(
+            winner[0], winner[1], loser[1], winner[2], loser[2]
+        )
 
     def _generate_preference_pairs_for_item(self, batch_item, **kwargs):
         self._preference_trajectories = {}
@@ -149,8 +196,12 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             for pair in pairs:
                 pair.agent_tensors = [
                     self._preference_tensors_from_text(
-                        idx, pair.prompts[idx], pair.winner_completions[idx], pair.loser_completions[idx]
-                    ) for idx in range(self.num_agents)
+                        idx,
+                        pair.prompts[idx],
+                        pair.winner_completions[idx],
+                        pair.loser_completions[idx],
+                    )
+                    for idx in range(self.num_agents)
                 ]
             self.preference_pairs_generated += len(pairs)
             return pairs
@@ -168,7 +219,9 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if source not in verified:
             comparator_tokenizer = AutoTokenizer.from_pretrained(source)
             vocabulary = comparator_tokenizer.get_vocab()
-            if any(tokenizer.get_vocab() != vocabulary for tokenizer in self.tokenizers):
+            if any(
+                tokenizer.get_vocab() != vocabulary for tokenizer in self.tokenizers
+            ):
                 raise ValueError(
                     "Travel comparator and actors must have identical token-to-ID vocabularies "
                     "to preserve constrained actions and preference token masks."
@@ -195,25 +248,37 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
     def _build_centralized_comparator_prompt(self, batch_item):
         raw = self.centralized_comparator_adapter.build_prompt(batch_item, [])
         formatter = wrap_formatter_with_chat_template(
-            lambda item: raw, self.tokenizers[0],
+            lambda item: raw,
+            self.tokenizers[0],
             system_prompt="You are one centralized travel planner. Plan both roles jointly and return only the requested fixed-schema JSON.",
         )
         return formatter(batch_item)
 
-    def _generate_centralized_comparator_outputs_for_item(self, batch_item, *, iteration_idx, num_candidates, **kwargs):
+    def _generate_centralized_comparator_outputs_for_item(
+        self, batch_item, *, iteration_idx, num_candidates, **kwargs
+    ):
         if self.args.comparator_policy != "history":
             return super()._generate_centralized_comparator_outputs_for_item(
-                batch_item, iteration_idx=iteration_idx, num_candidates=num_candidates, **kwargs)
+                batch_item,
+                iteration_idx=iteration_idx,
+                num_candidates=num_candidates,
+                **kwargs,
+            )
         checkpoint = self._history_policy_checkpoint_path(iteration_idx)
         key = (int(iteration_idx), checkpoint)
         if getattr(self, "_travel_central_history_key", None) != key:
             self._clear_travel_central_history()
-            self._travel_central_history_agent = self._load_single_policy_checkpoint_agent(checkpoint, 0)
+            self._travel_central_history_agent = (
+                self._load_single_policy_checkpoint_agent(checkpoint, 0)
+            )
             self._travel_central_history_key = key
         return self._generate_centralized_policy_output_for_agent(
-            self._travel_central_history_agent, batch_item,
+            self._travel_central_history_agent,
+            batch_item,
             prompt=self._build_centralized_comparator_prompt(batch_item),
-            num_candidates=num_candidates, **kwargs)
+            num_candidates=num_candidates,
+            **kwargs,
+        )
 
     def _clear_travel_central_history(self):
         agent = getattr(self, "_travel_central_history_agent", None)
@@ -222,57 +287,112 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if agent is not None:
             self._clear_transient_comparator_agents([agent])
 
-    def _generate_centralized_policy_output_for_agent(self, policy_agent, batch_item, *, prompt, num_candidates, **kwargs):
+    def _generate_centralized_policy_output_for_agent(
+        self, policy_agent, batch_item, *, prompt, num_candidates, **kwargs
+    ):
         if self._centralized_comparator_agent_index() != 0:
             raise ValueError("Travel centralized comparator uses policy agent index 0.")
         # The joint teacher has the same aggregate token budget as two role calls.
         budget = self.num_agents * int(self.args.max_new_tokens)
-        input_length = len(self.tokenizers[0].encode(
-            prompt + build_agent_json_prefill(0, batch_item['days']), add_special_tokens=False))
-        model_limit = getattr(unwrap_model(policy_agent).config, 'max_position_embeddings', None)
+        input_length = len(
+            self.tokenizers[0].encode(
+                prompt + build_agent_json_prefill(0, batch_item["days"]),
+                add_special_tokens=False,
+            )
+        )
+        model_limit = getattr(
+            unwrap_model(policy_agent).config, "max_position_embeddings", None
+        )
         if model_limit and input_length + budget > int(model_limit):
-            raise ValueError("Centralized Travel prompt plus output budget exceeds the model context window; refusing truncation.")
+            raise ValueError(
+                "Centralized Travel prompt plus output budget exceeds the model context window; refusing truncation."
+            )
         all_texts = []
         # Park unused actors/optimizer states while the single teacher generates.
-        unused = [i for i, actor in enumerate(self.agents) if unwrap_model(actor) is not unwrap_model(policy_agent)]
+        unused = [
+            i
+            for i, actor in enumerate(self.agents)
+            if unwrap_model(actor) is not unwrap_model(policy_agent)
+        ]
         with self._offload_actors(unused), self._comparator_rng(policy_agent):
-            for start in range(0, num_candidates, self.preference_generation_batch_size):
-                count = min(self.preference_generation_batch_size, num_candidates - start)
+            for start in range(
+                0, num_candidates, self.preference_generation_batch_size
+            ):
+                count = min(
+                    self.preference_generation_batch_size, num_candidates - start
+                )
                 result = StructuredOutputMAGRPOTrainer._generate_completions(
-                    self, policy_agent, [batch_item], agent_idx=0,
-                    num_return_sequences=count, max_new_tokens=budget,
-                    prompts_override=[prompt], slot_order_override=joint_slots(batch_item['days']), **kwargs)
-                all_texts.extend(result['completions'][0])
+                    self,
+                    policy_agent,
+                    [batch_item],
+                    agent_idx=0,
+                    num_return_sequences=count,
+                    max_new_tokens=budget,
+                    prompts_override=[prompt],
+                    slot_order_override=joint_slots(batch_item["days"]),
+                    **kwargs,
+                )
+                all_texts.extend(result["completions"][0])
         self.preference_joint_candidates += len(all_texts)
-        outputs = [{'prompts': [self.formatters[i](batch_item) + build_agent_json_prefill(i, batch_item['days'])],
-                    'batch_items': [batch_item], 'completions': [[]]} for i in range(2)]
+        outputs = [
+            {
+                "prompts": [
+                    self.formatters[i](batch_item)
+                    + build_agent_json_prefill(i, batch_item["days"])
+                ],
+                "batch_items": [batch_item],
+                "completions": [[]],
+            }
+            for i in range(2)
+        ]
         for joint_text in all_texts:
-            split = self.centralized_comparator_adapter.parse_completion(joint_text, batch_item, self.num_agents)
+            split = self.centralized_comparator_adapter.parse_completion(
+                joint_text, batch_item, self.num_agents
+            )
             for i, role_text in enumerate(split):
-                text, tokens, mask = project_role_tokens(self.tokenizers[i], role_text, i, batch_item['days'])
-                role_prompt = outputs[i]['prompts'][0]
-                outputs[i]['completions'][0].append(text)
+                text, tokens, mask = project_role_tokens(
+                    self.tokenizers[i], role_text, i, batch_item["days"]
+                )
+                role_prompt = outputs[i]["prompts"][0]
+                outputs[i]["completions"][0].append(text)
                 if self._preference_trajectories is not None:
-                    encoded = self.tokenizers[i]([role_prompt], padding=True, truncation=False, return_tensors='pt')
+                    encoded = self.tokenizers[i](
+                        [role_prompt],
+                        padding=True,
+                        truncation=False,
+                        return_tensors="pt",
+                    )
                     # Identical target text keeps its original, exact sampled trajectory.
-                    self._preference_trajectories.setdefault((i, role_prompt, text),
-                        (encoded.input_ids[0].detach().cpu().clone(), tokens, mask))
+                    self._preference_trajectories.setdefault(
+                        (i, role_prompt, text),
+                        (encoded.input_ids[0].detach().cpu().clone(), tokens, mask),
+                    )
         return outputs
 
     def _generate_history_policy_outputs_for_item(
-        self, batch_item, *, iteration_idx, num_candidates, **kwargs,
+        self,
+        batch_item,
+        *,
+        iteration_idx,
+        num_candidates,
+        **kwargs,
     ):
         checkpoint = self._history_policy_checkpoint_path(iteration_idx)
         key = (int(iteration_idx), checkpoint)
         if getattr(self, "_travel_history_comparator_key", None) != key:
             self._clear_travel_history_comparator()
-            self._travel_history_comparator_agents = self._load_policy_checkpoint_agents(checkpoint)
+            self._travel_history_comparator_agents = (
+                self._load_policy_checkpoint_agents(checkpoint)
+            )
             self._travel_history_comparator_key = key
         # Load once per collection phase, not twice per question. Both distinct
         # role checkpoints and CoMLRL's history-k resolution are preserved.
         return self._generate_policy_outputs_for_item(
-            self._travel_history_comparator_agents, batch_item,
-            num_candidates=num_candidates, use_comparator_rng=True, **kwargs,
+            self._travel_history_comparator_agents,
+            batch_item,
+            num_candidates=num_candidates,
+            use_comparator_rng=True,
+            **kwargs,
         )
 
     def _clear_travel_history_comparator(self):
@@ -296,33 +416,54 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         record = MADPOIterTrainer._preference_pair_to_record(pair)
         record["travel_tensor_version"] = 1
         record["travel_agent_tensors"] = [
-            {key: getattr(tensors, key).tolist() for key in TravelPreferenceTensors.__dataclass_fields__}
+            {
+                key: getattr(tensors, key).tolist()
+                for key in TravelPreferenceTensors.__dataclass_fields__
+            }
             for tensors in pair.agent_tensors
         ]
         return record
 
     def _preference_pair_from_record(self, record):
         if record.get("travel_tensor_version") != 1:
-            raise ValueError("Replay is missing Travel token masks; use a fresh preference_replay_dir.")
+            raise ValueError(
+                "Replay is missing Travel token masks; use a fresh preference_replay_dir."
+            )
         rows = record["travel_agent_tensors"]
         if len(rows) != self.num_agents:
             raise ValueError("Replay must contain one token/mask record per agent.")
-        tensors = [TravelPreferenceTensors(**{
-            key: torch.tensor(row[key], dtype=torch.bool if key.endswith("loss_mask") else torch.long)
-            for key in TravelPreferenceTensors.__dataclass_fields__
-        }) for row in rows]
+        tensors = [
+            TravelPreferenceTensors(
+                **{
+                    key: torch.tensor(
+                        row[key],
+                        dtype=torch.bool if key.endswith("loss_mask") else torch.long,
+                    )
+                    for key in TravelPreferenceTensors.__dataclass_fields__
+                }
+            )
+            for row in rows
+        ]
         return PreferencePair(
-            prompts=list(record["prompts"]), winner_completions=list(record["winner_completions"]),
-            loser_completions=list(record["loser_completions"]), agent_tensors=tensors,
-            winner_reward=float(record["winner_reward"]), loser_reward=float(record["loser_reward"]),
+            prompts=list(record["prompts"]),
+            winner_completions=list(record["winner_completions"]),
+            loser_completions=list(record["loser_completions"]),
+            agent_tensors=tensors,
+            winner_reward=float(record["winner_reward"]),
+            loser_reward=float(record["loser_reward"]),
             candidate_reward_mean=float(record["candidate_reward_mean"]),
-            raw_rewards=record.get("raw_rewards"), target_raw_reward=record.get("target_raw_reward"),
+            raw_rewards=record.get("raw_rewards"),
+            target_raw_reward=record.get("target_raw_reward"),
             comparator_raw_reward=record.get("comparator_raw_reward"),
         )
 
-    def _sequence_log_prob(self, agent_idx, prompt_input_ids, completion_ids, loss_mask=None):
+    def _sequence_log_prob(
+        self, agent_idx, prompt_input_ids, completion_ids, loss_mask=None
+    ):
         if loss_mask is None or completion_ids.numel() != loss_mask.numel():
-            raise ValueError("Travel DPO requires one value-token mask entry per completion token.")
+            raise ValueError(
+                "Travel DPO requires one value-token mask entry per completion token."
+            )
         agent = unwrap_model(self.agents[agent_idx])
         device = next(agent.parameters()).device
         prompt = prompt_input_ids.to(device)
@@ -332,10 +473,14 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             return torch.zeros((), device=device, requires_grad=True)
         agent.train()
         inputs = torch.cat((prompt, completion[:-1])).unsqueeze(0)
-        outputs = agent(input_ids=inputs, attention_mask=torch.ones_like(inputs), use_cache=False)
-        logits = outputs.logits[0, prompt.numel() - 1:]
+        outputs = agent(
+            input_ids=inputs, attention_mask=torch.ones_like(inputs), use_cache=False
+        )
+        logits = outputs.logits[0, prompt.numel() - 1 :]
         if logits.shape[0] != completion.numel():
-            raise ValueError("Travel preference logits are not aligned with all target tokens.")
+            raise ValueError(
+                "Travel preference logits are not aligned with all target tokens."
+            )
         logprob = -F.cross_entropy(logits[mask], completion[mask], reduction="sum")
         if self.normalize_value_log_probs:
             logprob = logprob / mask.sum()
@@ -344,9 +489,15 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
     def _agent_logprob_delta(self, agent_idx, pair):
         tensors = pair.agent_tensors[agent_idx]
         return self._sequence_log_prob(
-            agent_idx, tensors.prompt_input_ids, tensors.winner_completion_ids, tensors.winner_loss_mask
+            agent_idx,
+            tensors.prompt_input_ids,
+            tensors.winner_completion_ids,
+            tensors.winner_loss_mask,
         ) - self._sequence_log_prob(
-            agent_idx, tensors.prompt_input_ids, tensors.loser_completion_ids, tensors.loser_loss_mask
+            agent_idx,
+            tensors.prompt_input_ids,
+            tensors.loser_completion_ids,
+            tensors.loser_loss_mask,
         )
 
     @contextmanager
@@ -380,7 +531,9 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
                     }
 
     def _process_buffer(self, agent_idx, buffer):
-        with self._offload_actors(idx for idx in range(self.num_agents) if idx != agent_idx):
+        with self._offload_actors(
+            idx for idx in range(self.num_agents) if idx != agent_idx
+        ):
             result = super()._process_buffer(agent_idx, buffer)
         self._travel_last_eval_key = None
         return result
@@ -394,9 +547,14 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         # on the GPU, even when the optimizer batch contains several pairs.
         deltas = self._detached_agent_deltas(batch)
         beta = float(self.args.dpo_beta)
-        coefficients = [-beta * torch.sigmoid(torch.tensor(-beta * sum(row))).item() / len(batch) for row in deltas]
+        coefficients = [
+            -beta * torch.sigmoid(torch.tensor(-beta * sum(row))).item() / len(batch)
+            for row in deltas
+        ]
         for idx in range(self.num_agents):
-            with self._offload_actors(other for other in range(self.num_agents) if other != idx):
+            with self._offload_actors(
+                other for other in range(self.num_agents) if other != idx
+            ):
                 optimizer = self.optimizers[idx]
                 optimizer.zero_grad(set_to_none=True)
                 for pair, coefficient in zip(batch, coefficients):
@@ -405,14 +563,18 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
                         (1.0, tensors.winner_completion_ids, tensors.winner_loss_mask),
                         (-1.0, tensors.loser_completion_ids, tensors.loser_loss_mask),
                     ):
-                        logprob = self._sequence_log_prob(idx, tensors.prompt_input_ids, tokens, mask)
+                        logprob = self._sequence_log_prob(
+                            idx, tensors.prompt_input_ids, tokens, mask
+                        )
                         (coefficient * sign * logprob).backward()
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
         mean = sum(pair.candidate_reward_mean for pair in batch) / len(batch)
         return {"turn_1/reward_mean": mean, "turn_1/expected_return": mean}
 
-    def _log_iteration_replay(self, iteration_idx, *, train_pairs, current_pair_count, train_pair_count):
+    def _log_iteration_replay(
+        self, iteration_idx, *, train_pairs, current_pair_count, train_pair_count
+    ):
         # Reuse CoMLRL's raw-reward bins/plots and selected-pair diagnostics,
         # but do not commit with step=env_step: refresh and eval can share it.
         distributions = self._log_reward_distribution_enabled()
@@ -422,17 +584,26 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             "iter/current_iteration": int(iteration_idx + 1),
             "iter/current_preference_pairs": int(current_pair_count),
             "iter/total_preference_pairs": sum(
-                shard.num_pairs for shard in getattr(self, "_preference_replay_shards_state", [])
+                shard.num_pairs
+                for shard in getattr(self, "_preference_replay_shards_state", [])
             ),
             "iter/train_preference_pairs": int(train_pair_count),
         }
         if self.wandb_initialized and wandb.run is not None:
             if distributions:
-                metrics.update(self._iteration_reward_distribution_metrics(iteration_idx))
-                metrics.update(self._selected_reward_distribution_metrics(iteration_idx, train_pairs))
+                metrics.update(
+                    self._iteration_reward_distribution_metrics(iteration_idx)
+                )
+                metrics.update(
+                    self._selected_reward_distribution_metrics(
+                        iteration_idx, train_pairs
+                    )
+                )
             self._log_mapl_metrics(metrics)
         if self.verbose:
-            print(f"Travel iteration {iteration_idx + 1}: new_pairs={current_pair_count}, replay_pairs={train_pair_count}, preference_joint_candidates={self.preference_joint_candidates}")
+            print(
+                f"Travel iteration {iteration_idx + 1}: new_pairs={current_pair_count}, replay_pairs={train_pair_count}, preference_joint_candidates={self.preference_joint_candidates}"
+            )
 
     def _log_wandb_eval_metrics(self, metrics):
         self._log_mapl_metrics(metrics)
@@ -449,9 +620,12 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
     def _log_mapl_metrics(self, metrics):
         if not self.wandb_initialized or wandb.run is None:
             return
-        allowed = {key: value for key, value in metrics.items()
-                   if (key.startswith("eval/") or key.startswith("iter/"))
-                   and key != "eval/samples"}
+        allowed = {
+            key: value
+            for key, value in metrics.items()
+            if (key.startswith("eval/") or key.startswith("iter/"))
+            and key != "eval/samples"
+        }
         if not allowed:
             return
         if not getattr(self, "_travel_mapl_axes_defined", False):
@@ -474,16 +648,24 @@ class TravelJointRewardModel(nn.Module):
     def __init__(self, backbone, freeze_backbone=False):
         super().__init__()
         self.backbone = backbone
-        hidden_size = getattr(backbone.config, "hidden_size", None) or backbone.config.n_embd
+        hidden_size = (
+            getattr(backbone.config, "hidden_size", None) or backbone.config.n_embd
+        )
         reference = next(backbone.parameters())
-        self.reward_head = nn.Linear(hidden_size, 1).to(device=reference.device, dtype=reference.dtype)
+        self.reward_head = nn.Linear(hidden_size, 1).to(
+            device=reference.device, dtype=reference.dtype
+        )
         if freeze_backbone:
             backbone.requires_grad_(False)
 
     def forward(self, input_ids, attention_mask):
-        hidden = self.backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
+        hidden = self.backbone(
+            input_ids=input_ids, attention_mask=attention_mask, use_cache=False
+        ).last_hidden_state
         positions = attention_mask.long().sum(-1).clamp(min=1) - 1
-        return self.reward_head(hidden[torch.arange(hidden.shape[0], device=hidden.device), positions]).squeeze(-1)
+        return self.reward_head(
+            hidden[torch.arange(hidden.shape[0], device=hidden.device), positions]
+        ).squeeze(-1)
 
 
 class TravelRewardModelMixin:
@@ -497,8 +679,12 @@ class TravelRewardModelMixin:
         # Load on CPU. Actors are parked before this model moves to the GPU.
         backbone = AutoModel.from_pretrained(source, **kwargs)
         if not self.args.reward_freeze_backbone:
-            backbone.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        self.reward_model = TravelJointRewardModel(backbone, self.args.reward_freeze_backbone)
+            backbone.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+        self.reward_model = TravelJointRewardModel(
+            backbone, self.args.reward_freeze_backbone
+        )
         self.reward_optimizer = torch.optim.AdamW(
             (param for param in self.reward_model.parameters() if param.requires_grad),
             lr=float(self.args.reward_learning_rate),
@@ -527,11 +713,16 @@ class TravelRewardModelMixin:
             # The prefill is independent of trip length. Remove only a trailing
             # prefill, never JSON examples embedded in the role instructions.
             prefix = build_agent_json_prefill(idx, 3)
-            contexts.append(prompt[:-len(prefix)] if prompt.endswith(prefix) else prompt)
-        return json.dumps({
-            "joint_actions": list(completions),
-            "role_contexts": contexts,
-        }, ensure_ascii=False)
+            contexts.append(
+                prompt[: -len(prefix)] if prompt.endswith(prefix) else prompt
+            )
+        return json.dumps(
+            {
+                "joint_actions": list(completions),
+                "role_contexts": contexts,
+            },
+            ensure_ascii=False,
+        )
 
     def _score_reward_texts(self, texts):
         if self.reward_model is None or self.reward_tokenizer is None:
@@ -541,11 +732,15 @@ class TravelRewardModelMixin:
             encoded = self.reward_tokenizer(text, truncation=False, return_tensors="pt")
             length = int(encoded["input_ids"].shape[-1])
             if self.args.reward_max_length and length > self.args.reward_max_length:
-                raise ValueError(f"Travel reward input has {length} tokens, exceeding reward_max_length={self.args.reward_max_length}; increase the limit instead of truncating an agent's action/context.")
-            scores.append(self.reward_model(
-                input_ids=encoded["input_ids"].to(self.reward_device),
-                attention_mask=encoded["attention_mask"].to(self.reward_device),
-            ))
+                raise ValueError(
+                    f"Travel reward input has {length} tokens, exceeding reward_max_length={self.args.reward_max_length}; increase the limit instead of truncating an agent's action/context."
+                )
+            scores.append(
+                self.reward_model(
+                    input_ids=encoded["input_ids"].to(self.reward_device),
+                    attention_mask=encoded["attention_mask"].to(self.reward_device),
+                )
+            )
         return torch.cat(scores)
 
 
@@ -561,5 +756,7 @@ class TravelMARLHFTrainer(TravelRewardModelMixin, TravelPreferenceMixin, MARLHFT
     _train_preference_algorithm = MARLHFTrainer.train
 
 
-class TravelMARLHFIterTrainer(TravelRewardModelMixin, TravelPreferenceMixin, MARLHFIterTrainer):
+class TravelMARLHFIterTrainer(
+    TravelRewardModelMixin, TravelPreferenceMixin, MARLHFIterTrainer
+):
     _train_preference_algorithm = MARLHFIterTrainer.train

@@ -124,9 +124,7 @@ def scaled_party_cost(entry: CatalogEntry, people: int) -> float | None:
     return float(entry.cost)
 
 
-def accommodation_satisfies_room_type(
-    entry: CatalogEntry, requested: Any
-) -> bool:
+def accommodation_satisfies_room_type(entry: CatalogEntry, requested: Any) -> bool:
     if not requested:
         return True
     actual = canonical_value(entry.room_type)
@@ -138,18 +136,14 @@ def accommodation_satisfies_room_type(
     return actual == required
 
 
-def accommodation_satisfies_house_rule(
-    entry: CatalogEntry, requested: Any
-) -> bool:
+def accommodation_satisfies_house_rule(entry: CatalogEntry, requested: Any) -> bool:
     if not requested:
         return True
     forbidden = f"no {canonical_value(requested)}"
     return forbidden not in canonical_value(entry.house_rules)
 
 
-def transportation_satisfies_rule(
-    entry: CatalogEntry, requested: Any
-) -> bool:
+def transportation_satisfies_rule(entry: CatalogEntry, requested: Any) -> bool:
     if not requested:
         return True
     forbidden = {
@@ -404,8 +398,7 @@ def derive_route_scaffold(
             continue
         description = str(record.get("Description", "")).strip()
         match = re.fullmatch(
-            r"Flight\s+from\s+(.+?)\s+to\s+(.+?)\s+on\s+"
-            r"(\d{4}-\d{2}-\d{2})",
+            r"Flight\s+from\s+(.+?)\s+to\s+(.+?)\s+on\s+" r"(\d{4}-\d{2}-\d{2})",
             description,
             flags=re.I,
         )
@@ -605,9 +598,7 @@ def _route_evaluation(
     scaffold_match_bits = []
     for day in range(days):
         actual = parsed[day] if day < len(parsed) else None
-        expected = (
-            expected_scaffold[day] if day < len(expected_scaffold) else None
-        )
+        expected = expected_scaffold[day] if day < len(expected_scaffold) else None
         scaffold_match_bits.append(float(_route_row_matches(actual, expected)))
     scaffold_match_rate = _mean(scaffold_match_bits)
     components = [
@@ -681,11 +672,7 @@ def _transport_validity(
     dates: Sequence[str],
     catalog: ReferenceCatalog,
 ) -> Tuple[float, CatalogEntry | None]:
-    day_route = (
-        expected_scaffold[day - 1]
-        if day - 1 < len(expected_scaffold)
-        else None
-    )
+    day_route = expected_scaffold[day - 1] if day - 1 < len(expected_scaffold) else None
     if canonical_value(value) == "-":
         return (float(day_route is not None and day_route[0] == "stay"), None)
     entry = match_transport(value, catalog)
@@ -737,9 +724,7 @@ def evaluate_reference_plan(
 
     for day, row in enumerate(plan, start=1):
         expected_day_route = (
-            expected_scaffold[day - 1]
-            if day - 1 < len(expected_scaffold)
-            else None
+            expected_scaffold[day - 1] if day - 1 < len(expected_scaffold) else None
         )
         expected_day_cities = (
             (
@@ -747,11 +732,7 @@ def evaluate_reference_plan(
                 expected_day_route[2],
             )
             if expected_day_route is not None and expected_day_route[0] == "move"
-            else (
-                (expected_day_route[1],)
-                if expected_day_route is not None
-                else ()
-            )
+            else ((expected_day_route[1],) if expected_day_route is not None else ())
         )
         for field in PLAN_FIELDS:
             slot = (day, field)
@@ -764,9 +745,7 @@ def evaluate_reference_plan(
 
             if field == "current_city":
                 valid = float(
-                    _route_row_matches(
-                        route["parsed"][day - 1], expected_day_route
-                    )
+                    _route_row_matches(route["parsed"][day - 1], expected_day_route)
                     and all(
                         canonical_value(city) in catalog.allowed_cities
                         or canonical_value(city)
@@ -929,9 +908,7 @@ def evaluate_reference_plan(
         for key, value in commonsense_soft_values.items()
     }
 
-    required_cost_slots = {
-        slot for slot in required if slot[1] in COST_FIELDS
-    }
+    required_cost_slots = {slot for slot in required if slot[1] in COST_FIELDS}
     required_cost_known_bits = [
         float(
             bool(selected_entries.get(slot))
@@ -939,9 +916,7 @@ def evaluate_reference_plan(
         )
         for slot in required_cost_slots
     ]
-    required_cost_completeness = _mean(
-        required_cost_known_bits, default=0.0
-    )
+    required_cost_completeness = _mean(required_cost_known_bits, default=0.0)
     budget_cost_slots = required_cost_slots | nonempty_cost_slots
     budget_cost_known_bits = [
         float(
@@ -950,9 +925,7 @@ def evaluate_reference_plan(
         )
         for slot in budget_cost_slots
     ]
-    budget_cost_completeness = _mean(
-        budget_cost_known_bits, default=0.0
-    )
+    budget_cost_completeness = _mean(budget_cost_known_bits, default=0.0)
 
     budget = float(batch_item.get("budget", 0) or 0)
     if budget <= 0:
@@ -960,16 +933,12 @@ def evaluate_reference_plan(
     elif estimated_cost <= budget:
         budget_margin_score = 1.0
     else:
-        budget_margin_score = max(
-            0.0, 1.0 - (estimated_cost - budget) / budget
-        )
+        budget_margin_score = max(0.0, 1.0 - (estimated_cost - budget) / budget)
     # Dense training surface: retain grounding and known-price progress even
     # when one malformed entity keeps the strict terminal budget check at zero.
     # A fully grounded, fully costed, within-budget plan still maps to exactly 1.
     budget_soft = (
-        required_grounded_recall
-        * budget_cost_completeness
-        * budget_margin_score
+        required_grounded_recall * budget_cost_completeness * budget_margin_score
     )
     budget_pass = float(
         cost_complete
@@ -1168,12 +1137,8 @@ def evaluate_reference_plan(
         "_aggregate/required_slot_count": float(len(required_valid_bits)),
         "_aggregate/grounded_entity_count": float(sum(grounded_entity_bits)),
         "_aggregate/predicted_entity_count": float(len(grounded_entity_bits)),
-        "_aggregate/required_cost_known_count": float(
-            sum(required_cost_known_bits)
-        ),
-        "_aggregate/required_cost_slot_count": float(
-            len(required_cost_known_bits)
-        ),
+        "_aggregate/required_cost_known_count": float(sum(required_cost_known_bits)),
+        "_aggregate/required_cost_slot_count": float(len(required_cost_known_bits)),
         "reference_catalog_counts": {
             "restaurants": len(catalog.restaurants),
             "attractions": len(catalog.attractions),

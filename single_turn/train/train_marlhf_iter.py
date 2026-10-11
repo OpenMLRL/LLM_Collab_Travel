@@ -1,4 +1,5 @@
 """Run Travel MARLHF with iterative preference/reward refresh."""
+
 if __package__:
     from .train_mapl import main
 else:

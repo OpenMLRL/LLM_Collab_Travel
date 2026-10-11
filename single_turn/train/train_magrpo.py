@@ -253,12 +253,10 @@ def _dry_run(
             "short_days": curriculum["short_days"],
             "short_rows": len(curriculum["short_rows"]),
             "short_epochs": curriculum["short_epochs"],
-            "short_env_steps": curriculum["short_prompt_exposures"]
-            * num_generations,
+            "short_env_steps": curriculum["short_prompt_exposures"] * num_generations,
             "full_rows": len(train_rows),
             "full_epochs": curriculum["full_epochs"],
-            "full_env_steps": curriculum["full_prompt_exposures"]
-            * num_generations,
+            "full_env_steps": curriculum["full_prompt_exposures"] * num_generations,
         },
         "eval_at_end": _bool(magrpo.get("eval_at_end", True), default=True),
         "greedy_eval": _bool(config.get("travel.greedy_eval", True), default=True),

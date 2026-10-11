@@ -1,0 +1,3 @@
+[codespell]
+# "Brunch" is a restaurant name in test fixtures.
+ignore-words-list = brunch

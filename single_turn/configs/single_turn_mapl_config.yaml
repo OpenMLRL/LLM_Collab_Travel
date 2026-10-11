@@ -8,7 +8,7 @@ travel:
 
 mapl:
   parallel_training: none
-  agent_devices: [cuda:0, cuda:0]
+  agent_devices: ["cuda:0", "cuda:0"]
   num_agents: 2
   num_turns: 1
   joint_mode: aligned

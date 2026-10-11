@@ -330,9 +330,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
                 generated = []
                 # Remove only json.dumps' opening quote. Its escaped contents
                 # and closing quote are exactly what the policy must emit.
-                value_fragment = json.dumps(
-                    catalog_value, ensure_ascii=False
-                )[1:]
+                value_fragment = json.dumps(catalog_value, ensure_ascii=False)[1:]
                 for character in value_fragment:
                     constrained = processor(
                         torch.tensor([[2, 3, *generated]], dtype=torch.long),
@@ -479,9 +477,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             define_metric=Mock(),
         )
 
-        with patch(
-            "single_turn.train.structured_trainer.wandb", fake_wandb
-        ):
+        with patch("single_turn.train.structured_trainer.wandb", fake_wandb):
             metrics = trainer._log_eval_metrics(
                 all_agent_completions_turns=[[["a0"]], [["a1"]]],
                 all_batch_items=[{"prompt": "prompt"}],
@@ -535,9 +531,7 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         trainer.env_step = 5040
         fake_wandb = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
 
-        with patch(
-            "single_turn.train.structured_trainer.wandb", fake_wandb
-        ):
+        with patch("single_turn.train.structured_trainer.wandb", fake_wandb):
             metrics = trainer._log_eval_metrics(
                 all_agent_completions_turns=[[["a0"]], [["a1"]]],
                 all_batch_items=[{"prompt": "prompt"}],
@@ -594,13 +588,17 @@ class JSONGenerationConstraintTests(unittest.TestCase):
             return [process(agent_idx) for agent_idx in agent_indices]
 
         trainer._run_agent_tasks = Mock(side_effect=run_agent_tasks)
-        trainer._process_buffer = Mock(side_effect=lambda agent_idx, buffer: {
-            "log_entries": [{
-                "agent_idx": agent_idx,
-                "step": 40,
-                "metrics": {"train/reward": 0.5, "turn_1/reward_mean": 0.5},
-            }],
-        })
+        trainer._process_buffer = Mock(
+            side_effect=lambda agent_idx, buffer: {
+                "log_entries": [
+                    {
+                        "agent_idx": agent_idx,
+                        "step": 40,
+                        "metrics": {"train/reward": 0.5, "turn_1/reward_mean": 0.5},
+                    }
+                ],
+            }
+        )
         fake_wandb = SimpleNamespace(run=object(), log=Mock())
         with patch("comlrl.trainers.reinforce.magrpo.wandb", fake_wandb):
             trainer._drain_ready_buffers([0, 1])
@@ -619,28 +617,40 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         trainer.env_step = 40
         trainer.rollout_buffers = [["a0"], ["a1"]]
         trainer._parallel_agent_mode_enabled = Mock(return_value=False)
-        trainer._run_agent_tasks = Mock(side_effect=lambda process, agent_indices, parallel: [
-            process(idx) for idx in agent_indices
-        ])
-        trainer._process_buffer = Mock(side_effect=lambda agent_idx, buffer: {
-            "log_entries": [{
-                "agent_idx": agent_idx,
-                "step": trainer.env_step,
-                "metrics": {
-                    "train/reward": 0.5, "eval_full/reward": 0.5,
-                    "eval/samples": "table", "turn_1/reward_mean": 0.5,
-                    "turn_1/expected_return": 0.5,
-                },
-            }],
-        })
+        trainer._run_agent_tasks = Mock(
+            side_effect=lambda process, agent_indices, parallel: [
+                process(idx) for idx in agent_indices
+            ]
+        )
+        trainer._process_buffer = Mock(
+            side_effect=lambda agent_idx, buffer: {
+                "log_entries": [
+                    {
+                        "agent_idx": agent_idx,
+                        "step": trainer.env_step,
+                        "metrics": {
+                            "train/reward": 0.5,
+                            "eval_full/reward": 0.5,
+                            "eval/samples": "table",
+                            "turn_1/reward_mean": 0.5,
+                            "turn_1/expected_return": 0.5,
+                        },
+                    }
+                ],
+            }
+        )
         fake_wandb = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
         with patch("single_turn.train.structured_trainer.wandb", fake_wandb):
             trainer._drain_ready_buffers([1, 0, 1])
             self.assertEqual(trainer._process_buffer.call_count, 2)
-            fake_wandb.log.assert_called_once_with({
-                "env_step": 40, "turn_1/reward_mean": 0.5,
-                "turn_1/expected_return": 0.5,
-            }, commit=True)
+            fake_wandb.log.assert_called_once_with(
+                {
+                    "env_step": 40,
+                    "turn_1/reward_mean": 0.5,
+                    "turn_1/expected_return": 0.5,
+                },
+                commit=True,
+            )
             # Same step and sub-interval updates still train, but do not log.
             for step in (40, 44, 60):
                 trainer.env_step = step
@@ -659,21 +669,32 @@ class JSONGenerationConstraintTests(unittest.TestCase):
         trainer.env_step = 120
         fake_wandb = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
         with patch("single_turn.train.structured_trainer.wandb", fake_wandb):
-            trainer._log_wandb_magrpo_metrics({
-                "turn_1/reward_mean": 0.6, "train/reward": 0.6,
-                "eval_full/reward": 0.7, "eval/samples": 1,
-            }, env_step=120)
+            trainer._log_wandb_magrpo_metrics(
+                {
+                    "turn_1/reward_mean": 0.6,
+                    "train/reward": 0.6,
+                    "eval_full/reward": 0.7,
+                    "eval/samples": 1,
+                },
+                env_step=120,
+            )
             trainer._log_wandb_eval_metrics({"eval/reward": 0.7})
         self.assertEqual(fake_wandb.log.call_count, 2)
         for call in fake_wandb.log.call_args_list:
             self.assertEqual(call.args[0]["env_step"], 120)
             self.assertNotIn("step", call.kwargs)
             self.assertTrue(call.kwargs["commit"])
-        self.assertEqual(set(fake_wandb.log.call_args_list[0].args[0]), {
-            "env_step", "turn_1/reward_mean",
-        })
+        self.assertEqual(
+            set(fake_wandb.log.call_args_list[0].args[0]),
+            {
+                "env_step",
+                "turn_1/reward_mean",
+            },
+        )
         self.assertEqual(fake_wandb.define_metric.call_count, 3)
-        fake_wandb.define_metric.assert_any_call("env_step", hidden=True, summary="none")
+        fake_wandb.define_metric.assert_any_call(
+            "env_step", hidden=True, summary="none"
+        )
         fake_wandb.define_metric.assert_any_call("turn_1/*", step_metric="env_step")
         fake_wandb.define_metric.assert_any_call("eval/*", step_metric="env_step")
 
@@ -1243,9 +1264,7 @@ class TravelCurriculumTests(unittest.TestCase):
         self.assertAlmostEqual(record["train/reward"], 0.25)
         self.assertGreater(record["train/reward_group_std"], 0.0)
         self.assertEqual(record["train/nonzero_advantage_rate"], 1.0)
-        self.assertAlmostEqual(
-            record["train/required_cooperative_contribution"], 0.5
-        )
+        self.assertAlmostEqual(record["train/required_cooperative_contribution"], 0.5)
         self.assertAlmostEqual(record["train/required_plan_completion"], 0.5)
         self.assertEqual(record["train/curriculum_stage"], 0.0)
 
@@ -1262,9 +1281,7 @@ class TravelCurriculumTests(unittest.TestCase):
             MAGRPOTrainer, "_process_buffer", autospec=True, return_value=base_result
         ):
             result = trainer._process_buffer(0, [])
-        self.assertAlmostEqual(
-            result["log_entries"][0]["metrics"]["train/reward"], 0.3
-        )
+        self.assertAlmostEqual(result["log_entries"][0]["metrics"]["train/reward"], 0.3)
         self.assertEqual(trainer._travel_train_detail_groups, [])
 
 

@@ -2,7 +2,7 @@ extends: single_turn_marlhf_config.yaml
 mapl:
   collaboration_mode: centralized
   num_agents: 2  # Logical roles, one physical actor.
-  agent_devices: [cuda:0]
+  agent_devices: ["cuda:0"]
   max_new_tokens: 2048
 output:
   base_dir: output_single_turn_centralized_marlhf

@@ -7,7 +7,7 @@ mapl:
   pair_selection: comparator_reward
   comparator_policy: current_copy
   comparator_generation_mode: decentralized
-  comparator_devices: [cuda:0, cuda:0]
+  comparator_devices: ["cuda:0", "cuda:0"]
   preference_replay_mode: lambda_decay
   preference_replay_lambda: 0.8
   log_reward_distribution: true

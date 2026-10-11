@@ -143,28 +143,16 @@ def build_single_turn_eval_logger(
                 ],
                 "required_grounded_recall": detail["required_grounded_recall"],
                 "grounding_precision": detail["entity_grounding_precision"],
-                "required_cost_completeness": detail[
-                    "required_cost_completeness"
-                ],
+                "required_cost_completeness": detail["required_cost_completeness"],
                 "budget_constraint_soft": detail["budget_constraint_soft"],
                 "budget_pass": detail["ultimate/reference_budget_pass"],
                 "route_scaffold_match": detail["route_scaffold_match_rate"],
-                "plan_delivery": detail[
-                    "ultimate/reference_plan_delivery"
-                ],
-                "required_plan_completion": detail[
-                    "ultimate/required_plan_completion"
-                ],
-                "commonsense_micro": detail[
-                    "ultimate/reference_commonsense_micro"
-                ],
+                "plan_delivery": detail["ultimate/reference_plan_delivery"],
+                "required_plan_completion": detail["ultimate/required_plan_completion"],
+                "commonsense_micro": detail["ultimate/reference_commonsense_micro"],
                 "hard_micro": detail["ultimate/reference_hard_micro"],
-                "reference_plan_success": detail[
-                    "ultimate/reference_plan_success"
-                ],
-                "collaboration_success": detail[
-                    "ultimate/collaboration_success"
-                ],
+                "reference_plan_success": detail["ultimate/reference_plan_success"],
+                "collaboration_success": detail["ultimate/collaboration_success"],
                 "parser_errors": json.dumps(
                     detail["parser_errors"], ensure_ascii=False
                 ),

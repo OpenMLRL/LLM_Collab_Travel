@@ -129,9 +129,10 @@ def _plan_quality(
     metrics: Dict[str, Any], config: TravelRewardConfig
 ) -> Tuple[float, float]:
     grounding = float(metrics["required_grounded_recall"])
-    support = config.grounding_support_floor + (
-        1.0 - config.grounding_support_floor
-    ) * grounding
+    support = (
+        config.grounding_support_floor
+        + (1.0 - config.grounding_support_floor) * grounding
+    )
     quality = math.fsum(
         (
             support
@@ -139,9 +140,7 @@ def _plan_quality(
             * float(metrics["assignment_coverage"]),
             config.required_grounded_weight * grounding,
             config.grounding_f1_weight * float(metrics["grounding_f1"]),
-            support
-            * config.commonsense_weight
-            * float(metrics["commonsense_soft"]),
+            support * config.commonsense_weight * float(metrics["commonsense_soft"]),
             support
             * config.hard_constraint_weight
             * float(metrics["hard_constraint_soft"]),
@@ -225,9 +224,7 @@ def score_single_turn_response(
         batch_item=batch_item,
     )
     recovered_plan.pop("slot_validity")
-    recovered_required_slot_validity = recovered_plan.pop(
-        "required_slot_validity"
-    )
+    recovered_required_slot_validity = recovered_plan.pop("required_slot_validity")
     recovered_required_ratios = []
     structural_progress_scores = []
     recovery_violation_scores = []
@@ -246,15 +243,18 @@ def score_single_turn_response(
             verified / len(required_owned) if required_owned else 0.0
         )
         prefix = f"agent_{agent_idx}"
-        structural_progress = sum(
-            shaping.details[f"{prefix}/{key}"]
-            for key in (
-                "object_start",
-                "agent_id_match",
-                "assignments_list",
-                "closed_delimiters",
+        structural_progress = (
+            sum(
+                shaping.details[f"{prefix}/{key}"]
+                for key in (
+                    "object_start",
+                    "agent_id_match",
+                    "assignments_list",
+                    "closed_delimiters",
+                )
             )
-        ) / 4.0
+            / 4.0
+        )
         violation = max(
             shaping.details[f"{prefix}/recovery_overflow_rate"],
             shaping.details[f"{prefix}/recovery_rejected_rate"],
@@ -276,9 +276,7 @@ def score_single_turn_response(
             recovery_violation_scores,
         )
     ]
-    recovered_semantic_balance = _bottleneck(
-        recovered_semantic_role_scores
-    )
+    recovered_semantic_balance = _bottleneck(recovered_semantic_role_scores)
 
     plan_score, grounding_support = _plan_quality(detail, cfg)
     recovered_plan_score, recovered_grounding_support = _plan_quality(
@@ -292,9 +290,7 @@ def score_single_turn_response(
     joint_validity = float(detail["team_action_valid"])
     semantic_contribution = float(detail["required_cooperative_contribution"])
     strict_grounding = float(detail["required_grounded_recall"])
-    strict_composite_quality = _geometric_quality(
-        semantic_contribution, plan_score
-    )
+    strict_composite_quality = _geometric_quality(semantic_contribution, plan_score)
     final_success = float(detail["ultimate/collaboration_success"])
     positive_components = {
         "protocol_progress": cfg.protocol_progress_weight * protocol_progress,
@@ -343,10 +339,7 @@ def score_single_turn_response(
         and recovered_plan_score == 1.0
         and all(value == 0.0 for value in penalty_components.values())
     )
-    if (
-        perfect_endpoint
-        and abs(unclamped_reward - 1.0) <= 8 * math.ulp(1.0)
-    ):
+    if perfect_endpoint and abs(unclamped_reward - 1.0) <= 8 * math.ulp(1.0):
         # Keep the semantic maximum stable across Python versions without
         # rounding genuinely near-perfect samples up to a perfect score.
         unclamped_reward = 1.0
@@ -359,21 +352,14 @@ def score_single_turn_response(
         "plan_score": float(plan_score),
         "strict_composite_quality": float(strict_composite_quality),
         "joint_validity_gate": float(joint_validity),
-        "joint_quality_gate": float(
-            joint_validity * strict_composite_quality
-        ),
+        "joint_quality_gate": float(joint_validity * strict_composite_quality),
         "protocol_progress": float(protocol_progress),
         "recovered_semantic_balance": float(recovered_semantic_balance),
         "recovered_plan_score": float(recovered_plan_score),
         "recovered_composite_quality": float(recovered_composite_quality),
         "shaping/grounding_support": float(grounding_support),
-        "shaping/recovered_grounding_support": float(
-            recovered_grounding_support
-        ),
-        **{
-            f"shaping/{key}": float(value)
-            for key, value in shaping.details.items()
-        },
+        "shaping/recovered_grounding_support": float(recovered_grounding_support),
+        **{f"shaping/{key}": float(value) for key, value in shaping.details.items()},
         **{
             f"shaping/recovered_plan/{key}": float(recovered_plan[key])
             for key in (
@@ -387,9 +373,7 @@ def score_single_turn_response(
             )
         },
         **{
-            f"shaping/agent_{agent_idx}/recovered_required_contribution": float(
-                value
-            )
+            f"shaping/agent_{agent_idx}/recovered_required_contribution": float(value)
             for agent_idx, value in enumerate(recovered_required_ratios)
         },
         **{
@@ -397,9 +381,7 @@ def score_single_turn_response(
             for agent_idx, value in enumerate(protocol_role_scores)
         },
         **{
-            f"shaping/agent_{agent_idx}/recovered_semantic_progress": float(
-                value
-            )
+            f"shaping/agent_{agent_idx}/recovered_semantic_progress": float(value)
             for agent_idx, value in enumerate(recovered_semantic_role_scores)
         },
         **{
