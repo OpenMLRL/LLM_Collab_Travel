@@ -329,8 +329,8 @@ class PreferenceLoggingTests(unittest.TestCase):
             selected.comparator_raw_reward = .25
             fake = SimpleNamespace(run=object(), log=Mock(), define_metric=Mock())
             with patch("single_turn.train.preference_trainer.wandb", fake), \
-                 patch.object(trainer, "_reward_distribution_line_image", return_value="line-plot") as line_plot, \
-                 patch.object(trainer, "_reward_distribution_bar_image", return_value="bar-plot"):
+                 patch.object(trainer, "_reward_distribution_image", \
+                              side_effect=lambda *, title, edges, series, kind: f"{kind}-plot") as plot:
                 trainer._log_wandb_eval_metrics({"eval/reward": .4})
                 trainer._log_iteration_replay(0, train_pairs=[selected], current_pair_count=1, train_pair_count=1)
                 trainer._log_wandb_eval_metrics({
@@ -347,16 +347,23 @@ class PreferenceLoggingTests(unittest.TestCase):
             self.assertEqual(metrics["iter/total_preference_pairs"], 2)
             self.assertEqual(metrics["iter/reward_distribution/target_sample_count"], 3)
             self.assertEqual(metrics["iter/selected_reward_distribution/pair_count"], 1)
-            self.assertIn("iter/reward_distribution/iteration_0001/line_plot", metrics)
-            self.assertIn("iter/selected_reward_distribution/iteration_0001/bar_plot", metrics)
+            for distribution in ("reward_distribution", "selected_reward_distribution"):
+                for kind in ("line", "bar"):
+                    self.assertEqual(metrics[f"iter/{distribution}/iteration_0001/{kind}_plot"], f"{kind}-plot")
             self.assertEqual(fake.log.call_args_list[2].args[0], {"env_step": 0, "eval/reward": .5})
             fake.define_metric.assert_any_call("env_step", hidden=True, summary="none")
             fake.define_metric.assert_any_call("eval/*", step_metric="env_step")
             fake.define_metric.assert_any_call("iter/*", step_metric="iter/current_iteration")
             self.assertEqual(fake.define_metric.call_count, 4)
-            for call in line_plot.call_args_list:
+            self.assertEqual([call.kwargs["kind"] for call in plot.call_args_list], ["line", "bar", "line", "bar"])
+            for index, call in enumerate(plot.call_args_list):
                 edges = call.kwargs["edges"]
                 self.assertEqual((edges[0], edges[-1], len(edges)), (-.25, 1., 17))
+                counts = {name: {i: int(count) for i, count in enumerate(values) if count}
+                          for name, values in call.kwargs["series"]}
+                expected = ({"target": {0: 1, 9: 1, 15: 1}, "comparator": {4: 1, 6: 1, 12: 1}}
+                            if index < 2 else {"target": {9: 1}, "comparator": {6: 1}})
+                self.assertEqual(counts, expected)
             record = json.loads((Path(directory) / "reward_distributions/iteration_0001.json").read_text())
             self.assertEqual((record["reward_min"], record["reward_max"], record["num_bins"]), (-.25, 1., 16))
 
