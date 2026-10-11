@@ -614,6 +614,38 @@ not yet benchmarked with 4B models on B200. One actor reduces actor/model-state
 memory, but the longer joint context and reward-model phase still need a GPU
 smoke test before assuming a particular generation batch or memory peak.
 
+## Two-role IAC and MAAC
+
+The actor-critic entrypoints retain the same two role prompts, constrained JSON
+schema, value-token policy masks and joint Travel reward. IAC attaches an
+independent value head to each actor; MAAC trains two actors with one shared V
+critic conditioned on both role prompts. Both use the existing CoMLRL AC update,
+with value-token mean log probability for the actor objective. They require the
+CoMLRL `completion_loss_mask` hook; install the sibling library revision shipped
+with this integration.
+
+```bash
+python single_turn/train/train_iac.py --dry-run --override dataset.seed=42 seed=123
+python -u single_turn/train/train_iac.py --override dataset.seed=42 seed=123
+python -u single_turn/train/train_maac.py --override dataset.seed=42 seed=123
+```
+
+Equivalent explicit entrypoints are `train_actor_critic.py --algorithm iac` and
+`--algorithm maac`. Use `iac.*` or `maac.*` overrides. Defaults use two 4B actors
+on GPUs 0/1; MAAC places its 4B critic on GPU 2. Actors and critics use bfloat16,
+SDPA and gradient checkpointing; generation uses a KV cache. GPU memory and runtime
+still need a target-device smoke test. No cluster launcher is embedded here.
+
+The inherited filtered split contains 60 training and 20 held-out rows. Optional
+`dataset.seed` fixes the split independently from the top-level training `seed`;
+when omitted, the previous top-level-seed behavior is preserved. AC uses all 60
+rows from the first epoch, with 84 epochs and one joint generation per row
+(5040 joint rollouts). This matches MAGRPO's rollout count, not its optimizer
+update count or curriculum. Periodic greedy evaluation uses the same first four
+held-out rows; final evaluation saves all 20 in `final_metrics.json`, under
+`eval_full/*`, while W&B keeps `eval/*` on the fixed four-row anchor. Final model
+export retains both actors and their independent/shared value heads.
+
 ## Tests
 
 The tests require no pretrained model download; preference-loop tests use tiny

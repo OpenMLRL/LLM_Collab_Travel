@@ -1,0 +1,35 @@
+extends: single_turn_magrpo_config.yaml
+algorithm: iac
+travel:
+  curriculum_short_epochs: 0
+iac:
+  num_agents: 2
+  num_turns: 1
+  parallel_training: mp
+  agent_devices: ["cuda:0", "cuda:1"]
+  use_separate_critic: false
+  critic_type: v
+  num_train_epochs: 84
+  num_generations: 1
+  logging_steps: 20
+  agent_learning_rate: 5.0e-6
+  critic_learning_rate: 5.0e-6
+  max_new_tokens: 1024
+  rollout_buffer_size: 10
+  train_batch_size: 10
+  advantage_normalization: false
+  value_loss_coef: 0.6
+  value_clip_range: 0.2
+  discount: 1.0
+  early_termination_threshold: null
+  eval_interval: 60
+  eval_num_samples: 4
+  eval_batch_size: 1
+  reference_kl_enabled: false
+evaluation:
+  final_num_samples: 20
+output:
+  base_dir: output_single_turn_iac
+wandb:
+  name: Travel-iac-qwen3-4b
+  tags: [travelplanner, iac, two-actors, value-only, independent-critic]

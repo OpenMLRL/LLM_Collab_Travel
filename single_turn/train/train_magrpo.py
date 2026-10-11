@@ -68,7 +68,7 @@ def _load_data(config: Config):
         split=str(config.get("dataset.source_split", "validation")),
         train_samples=int(config.get("dataset.train_samples", 16)),
         eval_samples=int(config.get("dataset.eval_samples", 4)),
-        seed=int(config.get("seed", 42)),
+        seed=int(config.get("dataset.seed", config.get("seed", 42))),
         days=config.get("dataset.filters.days"),
         levels=config.get("dataset.filters.levels"),
         visiting_city_numbers=config.get("dataset.filters.visiting_city_numbers"),
