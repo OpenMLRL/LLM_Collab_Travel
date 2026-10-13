@@ -130,9 +130,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
         self.prompt_length = int(prompt_length)
         self.slots = tuple((int(day), str(field)) for day, field in slots)
         self.max_value_tokens = int(max_value_tokens)
-        self.max_new_tokens = (
-            None if max_new_tokens is None else int(max_new_tokens)
-        )
+        self.max_new_tokens = None if max_new_tokens is None else int(max_new_tokens)
         if self.max_new_tokens is not None and self.max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive when supplied.")
 
@@ -209,9 +207,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
         )
 
     @staticmethod
-    def _advance_value_fragment(
-        text: str, escape_state: int
-    ) -> Tuple[str, int, bool]:
+    def _advance_value_fragment(text: str, escape_state: int) -> Tuple[str, int, bool]:
         """Advance a JSON-string DFA over one decoded vocabulary token.
 
         Escape state 0 is ordinary text, 1 follows a backslash, and 2..5
@@ -257,9 +253,10 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
         return "continue", state, has_content
 
     def _prepare_vocab(self, vocab_size: int) -> None:
-        if self._value_masks_cpu and next(
-            iter(self._value_masks_cpu.values())
-        ).numel() == vocab_size:
+        if (
+            self._value_masks_cpu
+            and next(iter(self._value_masks_cpu.values())).numel() == vocab_size
+        ):
             return
         # Both Travel agents share one tokenizer object and can start generation
         # on separate threads. Build its O(V) masks only once.
@@ -282,9 +279,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
             }
             special_ids = {
                 int(token_id)
-                for token_id in (
-                    getattr(self.tokenizer, "all_special_ids", None) or []
-                )
+                for token_id in (getattr(self.tokenizer, "all_special_ids", None) or [])
                 if 0 <= int(token_id) < vocab_size
             }
             fragments: List[Optional[str]] = [None] * vocab_size
@@ -309,11 +304,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
                     if kind == "invalid":
                         continue
                     for value_has_content in (False, True):
-                        if (
-                            kind != "close"
-                            or value_has_content
-                            or token_has_content
-                        ):
+                        if kind != "close" or value_has_content or token_has_content:
                             masks[(escape_state, value_has_content)][token_id] = True
             if not masks[(0, False)].any() or not any(
                 self._advance_value_fragment(fragment or "", 0)[0] == "close"
@@ -341,9 +332,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
         cached = self._mask_cache.get(key)
         if cached is not None:
             return cached
-        mask = self._value_masks_cpu[
-            (int(escape_state), bool(value_has_content))
-        ].to(
+        mask = self._value_masks_cpu[(int(escape_state), bool(value_has_content))].to(
             device=device
         )
         self._mask_cache[key] = mask
@@ -352,7 +341,9 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
     def _reset(self, batch_size: int) -> None:
         self._states = [_FixedSlotState() for _ in range(batch_size)]
 
-    def _schedule(self, state: _FixedSlotState, mode: str, tokens: Sequence[int]) -> None:
+    def _schedule(
+        self, state: _FixedSlotState, mode: str, tokens: Sequence[int]
+    ) -> None:
         if not tokens:
             raise RuntimeError("Cannot schedule an empty constrained token sequence.")
         state.mode = mode
@@ -362,9 +353,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
     def _schedule_suffix(self, state: _FixedSlotState) -> None:
         self._schedule(state, "skeleton", self._suffix_tokens[state.slot_index])
 
-    def _forced_value_close_tokens(
-        self, state: _FixedSlotState
-    ) -> Tuple[int, ...]:
+    def _forced_value_close_tokens(self, state: _FixedSlotState) -> Tuple[int, ...]:
         """Return tokens that finish any partial escape and close the value."""
 
         if not state.value_has_content and state.escape_state == 0:
@@ -398,8 +387,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
                 fragment, state.escape_state
             )
             if kind == "invalid" or (
-                kind == "close"
-                and not (state.value_has_content or has_content)
+                kind == "close" and not (state.value_has_content or has_content)
             ):
                 state.invalid = True
                 raise RuntimeError(
@@ -442,8 +430,7 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
         ):
             self._reset(batch_size)
         starts = [
-            self.prompt_length + state.generated_token_count
-            for state in self._states
+            self.prompt_length + state.generated_token_count for state in self._states
         ]
         earliest = min(starts, default=sequence_length)
         # Copy the newly generated batch tail from CUDA only once. During
@@ -480,17 +467,14 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
         # escape, making its forced close longer than the current state's.
         # Only leave the value open when even that worst next state can still
         # be completed inside the generation budget.
-        fixed_tail = (
-            len(self._suffix_tokens[state.slot_index])
-            + self._minimum_blank_response_tokens(state.slot_index + 1)
-        )
+        fixed_tail = len(
+            self._suffix_tokens[state.slot_index]
+        ) + self._minimum_blank_response_tokens(state.slot_index + 1)
         safe_choice_budget = 1 + self._max_forced_close_length + fixed_tail
         return remaining < safe_choice_budget
 
     @staticmethod
-    def _force_token(
-        scores: torch.FloatTensor, row_idx: int, token_id: int
-    ) -> None:
+    def _force_token(scores: torch.FloatTensor, row_idx: int, token_id: int) -> None:
         scores[row_idx].fill_(float("-inf"))
         scores[row_idx, int(token_id)] = 0.0
 
@@ -506,18 +490,16 @@ class FixedSlotJSONLogitsProcessor(LogitsProcessor):
         if eos_id is None:
             eos_id = getattr(self.tokenizer, "pad_token_id", None)
         if eos_id is None:
-            raise ValueError("Tokenizer requires an EOS or pad token for JSON generation.")
+            raise ValueError(
+                "Tokenizer requires an EOS or pad token for JSON generation."
+            )
 
         for row_idx, state in enumerate(self._states):
             if state.mode == "value" and self._must_close_value(state):
                 close_tokens = self._forced_value_close_tokens(state)
                 self._schedule(
                     state,
-                    (
-                        "forced_close"
-                        if state.value_has_content
-                        else "forced_fallback"
-                    ),
+                    ("forced_close" if state.value_has_content else "forced_fallback"),
                     close_tokens,
                 )
 
@@ -732,9 +714,7 @@ class CompleteJSONObjectCriteria(StoppingCriteria):
                 done[row_idx] = True
                 continue
             active_rows.append(row_idx)
-            starts.append(
-                max(self.prompt_length, self._processed_lengths[row_idx])
-            )
+            starts.append(max(self.prompt_length, self._processed_lengths[row_idx]))
         if not active_rows:
             return done
 
@@ -752,10 +732,7 @@ class CompleteJSONObjectCriteria(StoppingCriteria):
                 )
                 completed_now = state.feed(fragment)
                 self._processed_lengths[row_idx] = sequence_length
-                if (
-                    completed_now
-                    and self._completed_response_lengths[row_idx] is None
-                ):
+                if completed_now and self._completed_response_lengths[row_idx] is None:
                     self._completed_response_lengths[row_idx] = max(
                         0, sequence_length - self.prompt_length
                     )

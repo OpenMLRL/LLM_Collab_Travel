@@ -261,9 +261,7 @@ def _minimum_transport_cost(
                 and transportation_satisfies_rule(
                     entry, constraints.get("transportation")
                 )
-                and _route_matches_transport(
-                    entry, day=day, route=route, dates=dates
-                )
+                and _route_matches_transport(entry, day=day, route=route, dates=dates)
             ):
                 candidates.append((entry.mode, cost))
         if not candidates:
@@ -358,9 +356,7 @@ def _minimum_experience_cost(
             for entry in catalog.restaurants
             if canonical_value(entry.city) == canonical_value(city)
         )
-        entries = sorted(
-            entries, key=lambda entry: entry.name.casefold()
-        )
+        entries = sorted(entries, key=lambda entry: entry.name.casefold())
         city_costs: Dict[Tuple[int, int], int] = {(0, 0): 0}
         for entry in entries:
             cost = _entry_cost_cents(entry, people)
@@ -368,9 +364,7 @@ def _minimum_experience_cost(
                 continue
             cuisines = {canonical_value(value) for value in entry.cuisines}
             coverage = sum(
-                1 << idx
-                for name, idx in requested_index.items()
-                if name in cuisines
+                1 << idx for name, idx in requested_index.items() if name in cuisines
             )
             updated = dict(city_costs)
             for (count, mask), current_cost in city_costs.items():
@@ -424,20 +418,14 @@ def _cached_role_budget_contract(
         catalog,
     )
     team_budget = _money_cents(raw_budget, budget=True) or 0
-    transport = _minimum_transport_cost(
-        catalog, scaffold, dates, constraints, people
-    )
-    accommodation = _minimum_accommodation_cost(
-        catalog, scaffold, constraints, people
-    )
+    transport = _minimum_transport_cost(catalog, scaffold, dates, constraints, people)
+    accommodation = _minimum_accommodation_cost(catalog, scaffold, constraints, people)
     logistics = (
         transport + accommodation
         if transport is not None and accommodation is not None
         else None
     )
-    experience = _minimum_experience_cost(
-        catalog, scaffold, constraints, people
-    )
+    experience = _minimum_experience_cost(catalog, scaffold, constraints, people)
 
     if team_budget <= 0:
         feasible = False
@@ -528,9 +516,7 @@ def _unique_sorted(
     return sorted(unique.values(), key=key)
 
 
-def _route_scaffold(
-    example: Dict[str, Any], catalog: ReferenceCatalog
-) -> List[str]:
+def _route_scaffold(example: Dict[str, Any], catalog: ReferenceCatalog) -> List[str]:
     """Derive one shared movement/stay scaffold from dated route records."""
 
     dates = coerce_trip_dates(example)
@@ -619,9 +605,7 @@ def _render_logistics_catalog(
     dates = coerce_trip_dates(example)
 
     def transport_hard_ok(entry: CatalogEntry) -> bool:
-        return transportation_satisfies_rule(
-            entry, constraints.get("transportation")
-        )
+        return transportation_satisfies_rule(entry, constraints.get("transportation"))
 
     def transport_eligible(entry: CatalogEntry) -> bool:
         return bool(
@@ -631,14 +615,10 @@ def _render_logistics_catalog(
         )
 
     def accommodation_room_ok(entry: CatalogEntry) -> bool:
-        return accommodation_satisfies_room_type(
-            entry, constraints.get("room type")
-        )
+        return accommodation_satisfies_room_type(entry, constraints.get("room type"))
 
     def accommodation_rule_ok(entry: CatalogEntry) -> bool:
-        return accommodation_satisfies_house_rule(
-            entry, constraints.get("house rule")
-        )
+        return accommodation_satisfies_house_rule(entry, constraints.get("house rule"))
 
     def accommodation_eligible(entry: CatalogEntry) -> bool:
         return bool(
@@ -720,11 +700,7 @@ def _render_experience_catalog(
         _first_per_evaluator_identity(catalog.attractions),
         key=lambda entry: (entry.city.casefold(), entry.name.casefold()),
     )
-    lines = [
-        _render_restaurant_catalog(
-            catalog, example=example, scaffold=scaffold
-        )
-    ]
+    lines = [_render_restaurant_catalog(catalog, example=example, scaffold=scaffold)]
     lines.extend(
         [
             "",
@@ -744,9 +720,7 @@ def _render_experience_catalog(
     return "\n".join(lines)
 
 
-def build_compact_reference_context(
-    example: Dict[str, Any], agent_idx: int
-) -> str:
+def build_compact_reference_context(example: Dict[str, Any], agent_idx: int) -> str:
     """Render shared routing plus only the catalog needed by one role.
 
     Fail closed for malformed upstream rows rather than silently reintroducing
@@ -785,20 +759,14 @@ ROLE-SPECIFIC COMPACT REFERENCE CATALOG
 {role_catalog}"""
 
 
-def _render_role_slot_checklist(
-    example: Mapping[str, Any], agent_idx: int
-) -> str:
-    catalog = parse_reference_catalog(
-        str(example.get("reference_information", ""))
-    )
+def _render_role_slot_checklist(example: Mapping[str, Any], agent_idx: int) -> str:
+    catalog = parse_reference_catalog(str(example.get("reference_information", "")))
     scaffold = derive_route_scaffold(example, catalog)
     lines = ["ROLE DAY-SLOT CHECKLIST (derived only from the shared scaffold)"]
     for day, (kind, origin, destination) in enumerate(scaffold, start=1):
         if int(agent_idx) == 0:
             city_value = (
-                f"from {origin} to {destination}"
-                if kind == "move"
-                else destination
+                f"from {origin} to {destination}" if kind == "move" else destination
             )
             transport = (
                 f"REQUIRED eligible=yes catalog option whose days include {day}"
@@ -808,10 +776,7 @@ def _render_role_slot_checklist(
             accommodation = (
                 'EMPTY: use "-"'
                 if day == len(scaffold)
-                else (
-                    "REQUIRED eligible=yes option whose days include "
-                    f"{day}"
-                )
+                else ("REQUIRED eligible=yes option whose days include " f"{day}")
             )
             lines.append(
                 f"- day={day}: current_city=EXACT "
@@ -882,11 +847,7 @@ def _render_role_hard_constraint_duty(
   its minimum_nights. Never mix self-driving with flight or taxi in one itinerary."""
     if int(agent_idx) == 1:
         requested = _requested_cuisines(constraints)
-        coverage = (
-            json.dumps(requested, ensure_ascii=False)
-            if requested
-            else "none"
-        )
+        coverage = json.dumps(requested, ensure_ascii=False) if requested else "none"
         return f"""ROLE-SPECIFIC HARD-CONSTRAINT DUTY
 - Requested cuisine coverage={coverage}. Across all REQUIRED meal slots, the union
   of selected restaurants' cuisines must include every requested cuisine at least once.
@@ -943,7 +904,9 @@ def _role_instruction(agent_idx: int, role_mode: str, days: int) -> str:
             "the role is guidance, not a hard action restriction."
         )
     else:
-        core = f"You are agent {agent_idx + 1}; select useful uncovered itinerary slots."
+        core = (
+            f"You are agent {agent_idx + 1}; select useful uncovered itinerary slots."
+        )
         allowed = "The role is guidance, not a hard action restriction."
 
     return f"{core}\n{allowed}"

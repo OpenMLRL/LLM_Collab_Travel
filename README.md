@@ -11,6 +11,25 @@ are removed during data normalization and are never used by the prompt, reward,
 or evaluation logger. Any itinerary can succeed if it is grounded and satisfies
 the explicit constraints.
 
+## Installation
+
+Install [CoMLRL](https://github.com/OpenMLRL/CoMLRL):
+
+```bash
+pip install comlrl
+# Install PyTorch compatible with your device
+```
+
+Or via conda-forge:
+
+```bash
+conda install -c conda-forge comlrl
+# Install PyTorch compatible with your device
+```
+
+A `CoMLRL/` checkout next to this repository takes precedence over the
+installed package, so local CoMLRL changes are used without reinstalling.
+
 ## Curriculum data
 
 The default run uses the 180-row TravelPlanner `validation` configuration as a
@@ -334,16 +353,8 @@ until results are separately run through the official database evaluator.
 
 ## Run
 
-Expected directory layout:
-
-```text
-GitHub/
-  CoMLRL/
-  LLM_Collab_Travel/
-```
-
-After activating the environment, verify the actual split, prompts, reference
-catalog, reward range, and 5040-step budget without loading a model:
+Verify the actual split, prompts, reference catalog, reward range, and
+5040-step budget without loading a model:
 
 ```bash
 cd /path/to/GitHub/LLM_Collab_Travel
@@ -425,8 +436,8 @@ native role generations retain their exact sampled token trajectories. Neither
 path reads `annotated_plan` or `gold_plan`.
 
 For comparator ablations, use BFCL-style names such as
-`travel-marlhf-iter-central-currentcmp-seed42-JOBID` (centralized) and
-`travel-marlhf-iter-currentcmp-seed42-JOBID` (decentralized). Other teacher labels
+`travel-marlhf-iter-central-currentcmp-seed42` (centralized) and
+`travel-marlhf-iter-currentcmp-seed42` (decentralized). Other teacher labels
 are `history1` and the model name. Reserve `current` for the current-data replay
 ablation, not the current-policy comparator; keep the replay setting in config
 and experiment group/tags.
@@ -533,8 +544,8 @@ For non-iterative MADPO/MARLHF omit `mapl.num_iterations`; MARLHF also supports
 updates; an all-tied run exits with an explicit error rather than reporting a
 successful training run. Check the final `preference_pairs` and `env_steps`.
 Each run writes its resolved
-configuration and final actors under a unique job/seed/time output directory;
-iterative preference replay stays in that run directory.
+configuration and final actors under a unique `<output.base_dir>/<run_id>`
+directory; iterative preference replay stays in that run directory.
 
 ## Centralized collaboration (independent opt-in entrypoint)
 
@@ -549,12 +560,9 @@ Use `single_turn/train/train_centralized.py`, with `--algorithm` set to `magrpo`
 `single_turn_centralized_<algorithm>_config.yaml`. No existing entrypoint or
 default configuration switches to centralized training automatically.
 
-The new entrypoint requires CoMLRL's centralized actor APIs, as in CoMLRL `cen`
-commit `998ea13` (or a revision containing it). The conventional sibling CoMLRL
-checkout is used by default. To keep an older core used by other jobs untouched,
-point **only this entrypoint** at a separate checkout using
-`TRAVEL_COMLRL_ROOT=/absolute/path/to/isolated/CoMLRL`. An older incompatible core
-fails before loading models; it never silently falls back to two actors.
+The entrypoint requires a CoMLRL version with the centralized actor APIs. An
+older incompatible CoMLRL fails before loading models; it never silently falls
+back to two actors.
 
 ```bash
 # Data / joint-output / reward checks, without model weights.
@@ -596,7 +604,7 @@ Outputs, replay and policy checkpoints use a separate, unique run directory.
 Joint replay is explicitly marked and rejects decentralized replay records.
 W&B names include `cenactor`; iterative defaults also include
 `central-currentcmp`, e.g.
-`travel-marlhf-iter-cenactor-central-currentcmp-seed42-<job>`.
+`travel-marlhf-iter-cenactor-central-currentcmp-seed42`.
 Thus `central` alone continues to mean the old **two-actor, central-comparator**
 ablation. Logging keeps the same compact eval/iter/distribution policy (and
 `turn_1` for MAGRPO), without restoring train, eval_full or sample-table panels.
@@ -605,6 +613,38 @@ The new integration is tested with tiny CPU actors and real optimizer updates,
 not yet benchmarked with 4B models on B200. One actor reduces actor/model-state
 memory, but the longer joint context and reward-model phase still need a GPU
 smoke test before assuming a particular generation batch or memory peak.
+
+## Two-role IAC and MAAC
+
+The actor-critic entrypoints retain the same two role prompts, constrained JSON
+schema, value-token policy masks and joint Travel reward. IAC attaches an
+independent value head to each actor; MAAC trains two actors with one shared V
+critic conditioned on both role prompts. Both use the existing CoMLRL AC update,
+with value-token mean log probability for the actor objective. They require the
+CoMLRL `completion_loss_mask` hook; install the sibling library revision shipped
+with this integration.
+
+```bash
+python single_turn/train/train_iac.py --dry-run --override dataset.seed=42 seed=123
+python -u single_turn/train/train_iac.py --override dataset.seed=42 seed=123
+python -u single_turn/train/train_maac.py --override dataset.seed=42 seed=123
+```
+
+Equivalent explicit entrypoints are `train_actor_critic.py --algorithm iac` and
+`--algorithm maac`. Use `iac.*` or `maac.*` overrides. Defaults use two 4B actors
+on GPUs 0/1; MAAC places its 4B critic on GPU 2. Actors and critics use bfloat16,
+SDPA and gradient checkpointing; generation uses a KV cache. GPU memory and runtime
+still need a target-device smoke test. No cluster launcher is embedded here.
+
+The inherited filtered split contains 60 training and 20 held-out rows. Optional
+`dataset.seed` fixes the split independently from the top-level training `seed`;
+when omitted, the previous top-level-seed behavior is preserved. AC uses all 60
+rows from the first epoch, with 84 epochs and one joint generation per row
+(5040 joint rollouts). This matches MAGRPO's rollout count, not its optimizer
+update count or curriculum. Periodic greedy evaluation uses the same first four
+held-out rows; final evaluation saves all 20 in `final_metrics.json`, under
+`eval_full/*`, while W&B keeps `eval/*` on the fixed four-row anchor. Final model
+export retains both actors and their independent/shared value heads.
 
 ## Tests
 
@@ -630,10 +670,5 @@ inputs, and all four training loops, including iterative refresh.
 
 Repository edits are intentionally left uncommitted for review in GitHub
 Desktop. Commit, push, and remote-cluster synchronization happen only when
-explicitly requested. Temporary Slurm scripts and profiling artifacts stay
+explicitly requested. Temporary launch scripts and profiling artifacts stay
 outside this repository.
-
-## Slurm runtime cache
-
-Training launchers isolate unset CUDA JIT caches per job on node-local storage.
-Update CoMLRL alongside this checkout; see the [runtime cache guide](docs/runtime_cache.md).

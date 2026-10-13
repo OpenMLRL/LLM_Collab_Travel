@@ -2,11 +2,11 @@ extends: single_turn_marlhf_iter_config.yaml
 mapl:
   collaboration_mode: centralized
   num_agents: 2  # Logical roles, one physical actor.
-  agent_devices: [cuda:0]
+  agent_devices: ["cuda:0"]
   max_new_tokens: 2048
   comparator_generation_mode: centralized
   comparator_centralized_agent_index: 0
-  comparator_devices: [cuda:0]
+  comparator_devices: ["cuda:0"]
 output:
   base_dir: output_single_turn_centralized_marlhf_iter
 wandb:

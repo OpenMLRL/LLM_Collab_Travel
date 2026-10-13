@@ -171,9 +171,7 @@ def evaluate_single_turn_response(
     contribution_min = min(required_grounded_contribution_ratios)
     # Keep some progress from the stronger role visible, but make the weaker
     # role dominate. A fully lazy teammate therefore caps this signal at 0.10.
-    required_cooperative_contribution = (
-        0.2 * contribution_mean + 0.8 * contribution_min
-    )
+    required_cooperative_contribution = 0.2 * contribution_mean + 0.8 * contribution_min
     contribution_deficit = 1.0 - cooperative_contribution
 
     raw_assignment_count = sum(parsed.raw_item_count for parsed in result.parsed)
@@ -192,10 +190,7 @@ def evaluate_single_turn_response(
     )
     both_agents_required_grounded = float(
         bool(required_grounded_contribution_ratios)
-        and all(
-            value >= 1.0 - 1e-9
-            for value in required_grounded_contribution_ratios
-        )
+        and all(value >= 1.0 - 1e-9 for value in required_grounded_contribution_ratios)
     )
     conflict_free = float(result.overlap_count == 0 and not result.conflict_slots)
     collaboration_success = float(
@@ -215,9 +210,7 @@ def evaluate_single_turn_response(
         "team_action_valid": float(team_action_valid),
         "team_soft_action_validity": float(team_soft_action_validity),
         "cooperative_contribution": float(cooperative_contribution),
-        "required_cooperative_contribution": float(
-            required_cooperative_contribution
-        ),
+        "required_cooperative_contribution": float(required_cooperative_contribution),
         "contribution_deficit": float(contribution_deficit),
         "overlap_count": float(result.overlap_count),
         "overlap_rate": float(overlap_rate),
@@ -261,9 +254,7 @@ def evaluate_single_turn_response(
         "count_fidelity": count_fidelity_scores,
         "item_acceptance": item_acceptance_scores,
         "verified_contribution": verified_contribution_ratios,
-        "required_grounded_contribution": (
-            required_grounded_contribution_ratios
-        ),
+        "required_grounded_contribution": (required_grounded_contribution_ratios),
         "assignment_count": result.agent_assignment_counts,
     }
     for metric_name, values in per_agent_sequences.items():

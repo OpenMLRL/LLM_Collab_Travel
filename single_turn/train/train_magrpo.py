@@ -20,7 +20,7 @@ for path in (COMLRL_ROOT, REPO_ROOT):
         sys.path.insert(0, str(path))
 
 from single_turn.aggregation import owned_slots
-from single_turn.config import Config, add_config_args, parse_overrides
+from single_turn.config import Config, add_config_args, parse_overrides, run_id
 from single_turn.data import load_single_turn_datasets
 from single_turn.formatting import (
     build_role_budget_contract,
@@ -68,7 +68,7 @@ def _load_data(config: Config):
         split=str(config.get("dataset.source_split", "validation")),
         train_samples=int(config.get("dataset.train_samples", 16)),
         eval_samples=int(config.get("dataset.eval_samples", 4)),
-        seed=int(config.get("seed", 42)),
+        seed=int(config.get("dataset.seed", config.get("seed", 42))),
         days=config.get("dataset.filters.days"),
         levels=config.get("dataset.filters.levels"),
         visiting_city_numbers=config.get("dataset.filters.visiting_city_numbers"),
@@ -102,7 +102,7 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
     if not _bool(section.get("enabled", True), default=True):
         return None
     return {
-        "project": section.get("project", "travelplanner-collab"),
+        "project": section.get("project"),
         "entity": section.get("entity", "OpenMLRL"),
         "name": section.get("name", "single_turn_magrpo"),
         "dir": section.get("dir", output_dir),
@@ -253,12 +253,10 @@ def _dry_run(
             "short_days": curriculum["short_days"],
             "short_rows": len(curriculum["short_rows"]),
             "short_epochs": curriculum["short_epochs"],
-            "short_env_steps": curriculum["short_prompt_exposures"]
-            * num_generations,
+            "short_env_steps": curriculum["short_prompt_exposures"] * num_generations,
             "full_rows": len(train_rows),
             "full_epochs": curriculum["full_epochs"],
-            "full_env_steps": curriculum["full_prompt_exposures"]
-            * num_generations,
+            "full_env_steps": curriculum["full_prompt_exposures"] * num_generations,
         },
         "eval_at_end": _bool(magrpo.get("eval_at_end", True), default=True),
         "greedy_eval": _bool(config.get("travel.greedy_eval", True), default=True),
@@ -310,10 +308,6 @@ def _dry_run(
 
 
 def main() -> None:
-    from comlrl.runtime import configure_job_cuda_cache
-
-    configure_job_cuda_cache()
-
     parser = argparse.ArgumentParser(
         description="Train MAGRPO on single-turn TravelPlanner collaboration."
     )
@@ -425,8 +419,7 @@ def main() -> None:
             tokenizer.add_special_tokens(model_config.special_tokens)
 
     output_base = str(config.get("output.base_dir", "output_single_turn_magrpo"))
-    job_id = os.environ.get("SLURM_JOB_ID", "no_job_id")
-    output_dir = os.path.join(output_base, f"job_{job_id}")
+    output_dir = os.path.join(output_base, run_id())
     os.makedirs(output_dir, exist_ok=True)
     config.save(os.path.join(output_dir, "config.yaml"))
 
@@ -496,7 +489,6 @@ def main() -> None:
         },
         train_dataset=train_rows,
         eval_dataset=eval_rows,
-        dataset_type="travelplanner",
         reward_func=reward,
         reward_processor=_build_reward_processor(config),
         formatters=formatters,

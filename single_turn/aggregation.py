@@ -136,9 +136,7 @@ def merge_agent_assignments(
             raise ValueError("capacities must contain one value per agent.")
     else:
         shared_capacity = (
-            assignment_capacity(days, num_agents)
-            if capacity is None
-            else int(capacity)
+            assignment_capacity(days, num_agents) if capacity is None else int(capacity)
         )
         resolved_capacities = [shared_capacity] * num_agents
     parsed = [

@@ -24,7 +24,7 @@ class TravelCentralizedComparatorAdapter:
             f"REFERENCE ROLE {i} (context only):\n{formatter(batch_item)}"
             for i, formatter in enumerate(raw)
         )
-        slots = joint_slots(batch_item['days'])
+        slots = joint_slots(batch_item["days"])
         return f"""You are ONE centralized travel planner, not one of two isolated agents.
 You see both roles' information and choose the entire itinerary jointly in one response.
 The reference role instructions below specify the same trip, catalogs, constraints,
@@ -50,27 +50,51 @@ The assistant prefill is already supplied. Continue inside its first value strin
 
     def parse_completion(self, completion, batch_item, num_agents):
         if num_agents != 2:
-            raise ValueError('Travel centralized comparator requires two actor roles.')
+            raise ValueError("Travel centralized comparator requires two actor roles.")
         data = json.loads(completion)
-        if not isinstance(data, dict) or type(data.get('agent_id')) is not int or data['agent_id'] != 0:
-            raise ValueError('Centralized Travel output must have integer agent_id=0.')
-        assignments = data.get('assignments')
-        expected = joint_slots(batch_item['days'])
+        if (
+            not isinstance(data, dict)
+            or type(data.get("agent_id")) is not int
+            or data["agent_id"] != 0
+        ):
+            raise ValueError("Centralized Travel output must have integer agent_id=0.")
+        assignments = data.get("assignments")
+        expected = joint_slots(batch_item["days"])
         if not isinstance(assignments, list) or len(assignments) != len(expected):
-            raise ValueError('Centralized Travel output must contain every joint slot exactly once.')
+            raise ValueError(
+                "Centralized Travel output must contain every joint slot exactly once."
+            )
         values = {}
         for assignment, slot in zip(assignments, expected):
-            if not isinstance(assignment, dict) or set(assignment) != {'day','field','value'}:
-                raise ValueError('Invalid centralized Travel assignment schema.')
-            if type(assignment['day']) is not int or (assignment['day'], assignment['field']) != slot:
-                raise ValueError('Centralized Travel slots must be in the joint day-major order.')
-            if not isinstance(assignment['value'], str):
-                raise ValueError('Centralized Travel values must be strings.')
-            values[slot] = assignment['value']
-        return [json.dumps({'agent_id': i, 'assignments': [
-            {'day': day, 'field': field, 'value': values[day, field]}
-            for day, field in ordered_owned_slots(i, batch_item['days'])
-        ]}, ensure_ascii=False) for i in range(2)]
+            if not isinstance(assignment, dict) or set(assignment) != {
+                "day",
+                "field",
+                "value",
+            }:
+                raise ValueError("Invalid centralized Travel assignment schema.")
+            if (
+                type(assignment["day"]) is not int
+                or (assignment["day"], assignment["field"]) != slot
+            ):
+                raise ValueError(
+                    "Centralized Travel slots must be in the joint day-major order."
+                )
+            if not isinstance(assignment["value"], str):
+                raise ValueError("Centralized Travel values must be strings.")
+            values[slot] = assignment["value"]
+        return [
+            json.dumps(
+                {
+                    "agent_id": i,
+                    "assignments": [
+                        {"day": day, "field": field, "value": values[day, field]}
+                        for day, field in ordered_owned_slots(i, batch_item["days"])
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            for i in range(2)
+        ]
 
 
 def project_role_tokens(tokenizer, completion, agent_idx, days):
@@ -83,27 +107,42 @@ def project_role_tokens(tokenizer, completion, agent_idx, days):
     """
     data = json.loads(completion)
     slots = ordered_owned_slots(agent_idx, days)
-    assignments = data['assignments']
-    if data['agent_id'] != agent_idx or len(assignments) != len(slots):
-        raise ValueError('Central comparator projection does not match the actor role.')
+    assignments = data["assignments"]
+    if data["agent_id"] != agent_idx or len(assignments) != len(slots):
+        raise ValueError("Central comparator projection does not match the actor role.")
     tokens, mask, pieces = [], [], []
     for index, ((day, field), assignment) in enumerate(zip(slots, assignments)):
-        if (assignment['day'], assignment['field']) != (day, field) or not isinstance(assignment['value'], str):
-            raise ValueError('Central comparator projection has invalid role slots/values.')
-        value = json.dumps(assignment['value'], ensure_ascii=False)[1:]
+        if (assignment["day"], assignment["field"]) != (day, field) or not isinstance(
+            assignment["value"], str
+        ):
+            raise ValueError(
+                "Central comparator projection has invalid role slots/values."
+            )
+        value = json.dumps(assignment["value"], ensure_ascii=False)[1:]
         if index + 1 == len(slots):
-            suffix = '}]}'
+            suffix = "}]}"
         else:
             next_day, next_field = slots[index + 1]
             suffix = f'}}, {{"day": {next_day}, "field": {json.dumps(next_field)}, "value": "'
         for text, learnable in ((value, True), (suffix, False)):
             ids = tokenizer.encode(text, add_special_tokens=False)
-            if tokenizer.decode(ids, skip_special_tokens=True, clean_up_tokenization_spaces=False) != text:
-                raise ValueError('Tokenizer does not round-trip the projected Travel action.')
+            if (
+                tokenizer.decode(
+                    ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                )
+                != text
+            ):
+                raise ValueError(
+                    "Tokenizer does not round-trip the projected Travel action."
+                )
             tokens.extend(ids)
             mask.extend([learnable] * len(ids))
             pieces.append(text)
-    text = build_agent_json_prefill(agent_idx, days) + ''.join(pieces)
+    text = build_agent_json_prefill(agent_idx, days) + "".join(pieces)
     if json.loads(text) != data:
-        raise ValueError('Centralized role projection changed assignment values.')
-    return text, torch.tensor(tokens, dtype=torch.long), torch.tensor(mask, dtype=torch.bool)
+        raise ValueError("Centralized role projection changed assignment values.")
+    return (
+        text,
+        torch.tensor(tokens, dtype=torch.long),
+        torch.tensor(mask, dtype=torch.bool),
+    )

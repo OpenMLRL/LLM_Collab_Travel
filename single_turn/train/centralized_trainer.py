@@ -23,7 +23,9 @@ class TravelCentralizedActorMixin:
             raise ValueError("Use centralized configuration with this trainer.")
         super().__init__(*args, **kwargs)
         if self.num_agents != 1 or len(self.agents) != 1 or len(self.optimizers) != 1:
-            raise RuntimeError("Centralized Travel must construct exactly one actor/optimizer.")
+            raise RuntimeError(
+                "Centralized Travel must construct exactly one actor/optimizer."
+            )
         if not self.constrain_json_skeleton:
             raise ValueError("Centralized Travel requires the joint JSON grammar.")
         # Preserve Travel's bounded diagnostic queue through the core reward
@@ -34,33 +36,59 @@ class TravelCentralizedActorMixin:
             runtime.drain_details = drain
 
     def _generate_completions(
-        self, agent, batch_items, agent_idx=0, num_return_sequences=1,
-        max_new_tokens=2048, prompts_override=None, external_prompts=None, **kwargs,
+        self,
+        agent,
+        batch_items,
+        agent_idx=0,
+        num_return_sequences=1,
+        max_new_tokens=2048,
+        prompts_override=None,
+        external_prompts=None,
+        **kwargs,
     ):
         if agent_idx != 0 or len(batch_items) != 1:
-            raise ValueError("Centralized Travel generates one joint prompt with actor 0.")
+            raise ValueError(
+                "Centralized Travel generates one joint prompt with actor 0."
+            )
         if "slot_order_override" in kwargs:
-            raise ValueError("The centralized actor owns all joint slots; do not override them.")
+            raise ValueError(
+                "The centralized actor owns all joint slots; do not override them."
+            )
         prompts = self._resolve_prompts(
-            batch_items, agent_idx=0, prompts_override=prompts_override,
+            batch_items,
+            agent_idx=0,
+            prompts_override=prompts_override,
             external_prompts=external_prompts,
         )
         tokenizer = self.tokenizers[0]
-        prompt_length = len(tokenizer.encode(
-            prompts[0] + build_agent_json_prefill(0, batch_items[0]["days"]),
-            add_special_tokens=True,
-        ))
-        model_limit = getattr(unwrap_model(agent).config, "max_position_embeddings", None)
+        prompt_length = len(
+            tokenizer.encode(
+                prompts[0] + build_agent_json_prefill(0, batch_items[0]["days"]),
+                add_special_tokens=True,
+            )
+        )
+        model_limit = getattr(
+            unwrap_model(agent).config, "max_position_embeddings", None
+        )
         if model_limit and prompt_length + max_new_tokens > int(model_limit):
-            raise ValueError("Centralized Travel prompt plus output budget exceeds the model context window; refusing truncation.")
+            raise ValueError(
+                "Centralized Travel prompt plus output budget exceeds the model context window; refusing truncation."
+            )
         tokenizer_limit = getattr(tokenizer, "model_max_length", None)
         if tokenizer_limit and prompt_length > int(tokenizer_limit):
-            raise ValueError("Centralized Travel prompt exceeds tokenizer context window; refusing truncation.")
+            raise ValueError(
+                "Centralized Travel prompt exceeds tokenizer context window; refusing truncation."
+            )
         return super()._generate_completions(
-            agent, batch_items, agent_idx=0,
-            num_return_sequences=num_return_sequences, max_new_tokens=max_new_tokens,
-            prompts_override=prompts, external_prompts=None,
-            slot_order_override=joint_slots(batch_items[0]["days"]), **kwargs,
+            agent,
+            batch_items,
+            agent_idx=0,
+            num_return_sequences=num_return_sequences,
+            max_new_tokens=max_new_tokens,
+            prompts_override=prompts,
+            external_prompts=None,
+            slot_order_override=joint_slots(batch_items[0]["days"]),
+            **kwargs,
         )
 
     def _log_eval_metrics(self, all_agent_completions_turns, *args, **kwargs):
@@ -79,18 +107,28 @@ class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
         return self.formatters[0](batch_item)
 
     def _generate_centralized_policy_output_for_agent(
-        self, policy_agent, batch_item, *, prompt, num_candidates, **kwargs,
+        self,
+        policy_agent,
+        batch_item,
+        *,
+        prompt,
+        num_candidates,
+        **kwargs,
     ):
         unused = [
-            i for i, actor in enumerate(self.agents)
+            i
+            for i, actor in enumerate(self.agents)
             if unwrap_model(actor) is not unwrap_model(policy_agent)
         ]
         with self._offload_actors(unused), self._comparator_rng(policy_agent):
             result = self._generate_completions(
-                policy_agent, [batch_item], agent_idx=0,
+                policy_agent,
+                [batch_item],
+                agent_idx=0,
                 num_return_sequences=num_candidates,
                 max_new_tokens=self.args.max_new_tokens,
-                prompts_override=[prompt], **kwargs,
+                prompts_override=[prompt],
+                **kwargs,
             )
         # Includes the exact joint tokens/masks cached by TravelPreferenceMixin
         # and the same prefilled prompt as target candidates. Do not split here.
@@ -104,7 +142,9 @@ class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
 
     def _preference_pair_from_record(self, record):
         if record.get("travel_collaboration_mode") != "centralized":
-            raise ValueError("Centralized actors require their own fresh joint-policy replay directory.")
+            raise ValueError(
+                "Centralized actors require their own fresh joint-policy replay directory."
+            )
         return super()._preference_pair_from_record(record)
 
 
@@ -114,17 +154,25 @@ class TravelCentralizedMAGRPOTrainer(
     pass
 
 
-class TravelCentralizedMADPOTrainer(TravelCentralizedPreferenceMixin, TravelMADPOTrainer):
+class TravelCentralizedMADPOTrainer(
+    TravelCentralizedPreferenceMixin, TravelMADPOTrainer
+):
     pass
 
 
-class TravelCentralizedMADPOIterTrainer(TravelCentralizedPreferenceMixin, TravelMADPOIterTrainer):
+class TravelCentralizedMADPOIterTrainer(
+    TravelCentralizedPreferenceMixin, TravelMADPOIterTrainer
+):
     pass
 
 
-class TravelCentralizedMARLHFTrainer(TravelCentralizedPreferenceMixin, TravelMARLHFTrainer):
+class TravelCentralizedMARLHFTrainer(
+    TravelCentralizedPreferenceMixin, TravelMARLHFTrainer
+):
     pass
 
 
-class TravelCentralizedMARLHFIterTrainer(TravelCentralizedPreferenceMixin, TravelMARLHFIterTrainer):
+class TravelCentralizedMARLHFIterTrainer(
+    TravelCentralizedPreferenceMixin, TravelMARLHFIterTrainer
+):
     pass

@@ -87,9 +87,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                 "value-token mask is applied to the reference KL."
             )
         if self.curriculum_short_epochs > int(self.args.num_train_epochs):
-            raise ValueError(
-                "curriculum_short_epochs cannot exceed num_train_epochs."
-            )
+            raise ValueError("curriculum_short_epochs cannot exceed num_train_epochs.")
         if self.curriculum_short_epochs and self.curriculum_train_dataset is None:
             raise ValueError(
                 "curriculum_train_dataset is required when the short phase is enabled."
@@ -171,13 +169,9 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "_step": float(self.env_step + len(reward_values)),
             "train/reward": reward_mean,
             "train/reward_group_std": reward_std,
-            "train/nonzero_advantage_rate": sum(
-                value > 1e-6 for value in centered
-            )
+            "train/nonzero_advantage_rate": sum(value > 1e-6 for value in centered)
             / len(centered),
-            "train/meaningful_advantage_rate": sum(
-                value > 1e-3 for value in centered
-            )
+            "train/meaningful_advantage_rate": sum(value > 1e-3 for value in centered)
             / len(centered),
             "train/curriculum_stage": float(
                 getattr(self, "_travel_curriculum_stage", 1)
@@ -192,27 +186,19 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "train/required_grounded_recall": "required_grounded_recall",
             "train/entity_grounding_precision": "entity_grounding_precision",
             "train/grounding_f1": "grounding_f1",
-            "train/required_cost_completeness": (
-                "required_cost_completeness"
-            ),
+            "train/required_cost_completeness": ("required_cost_completeness"),
             "train/reference_budget_soft": "budget_constraint_soft",
             "train/reference_budget_pass": "ultimate/reference_budget_pass",
             "train/reference_commonsense_soft": "commonsense_soft",
             "train/reference_hard_soft": "hard_constraint_soft",
-            "train/required_plan_completion": (
-                "ultimate/required_plan_completion"
-            ),
-            "train/reference_plan_success": (
-                "ultimate/reference_plan_success"
-            ),
+            "train/required_plan_completion": ("ultimate/required_plan_completion"),
+            "train/reference_plan_success": ("ultimate/reference_plan_success"),
             "train/plan_score": "plan_score",
             "train/strict_composite_quality": "strict_composite_quality",
             "train/protocol_progress": "protocol_progress",
             "train/recovered_semantic_balance": "recovered_semantic_balance",
             "train/recovered_plan_score": "recovered_plan_score",
-            "train/recovered_composite_quality": (
-                "recovered_composite_quality"
-            ),
+            "train/recovered_composite_quality": ("recovered_composite_quality"),
             "train/collaboration_success": "ultimate/collaboration_success",
         }
         for output_key, detail_key in detail_keys.items():
@@ -256,7 +242,9 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         if not (self.wandb_initialized and wandb.run is not None):
             return
 
-        entries = [entry for result in results for entry in result.get("log_entries", [])]
+        entries = [
+            entry for result in results for entry in result.get("log_entries", [])
+        ]
         entries.sort(key=lambda entry: (int(entry["step"]), int(entry["agent_idx"])))
         by_step: Dict[int, Dict[str, Any]] = {}
         for entry in entries:
@@ -364,9 +352,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
 
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         num_samples = 0
-        for seq_idx, (raw_tokens, raw_mask) in enumerate(
-            zip(completion_ids, masks)
-        ):
+        for seq_idx, (raw_tokens, raw_mask) in enumerate(zip(completion_ids, masks)):
             completion_tokens = raw_tokens.to(device)
             loss_mask = raw_mask.to(device=device, dtype=torch.bool)
             if completion_tokens.numel() != loss_mask.numel():
@@ -423,8 +409,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
     def _log_eval_metrics(
         self,
         all_agent_completions_turns: Any,
-        all_test_cases: Any,
-        all_entry_points: Any,
+        all_batch_items: Any,
         all_prompts: Any,
         extra_metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -440,8 +425,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         ):
             detailed = self.eval_logger(
                 agent_completions_turns=all_agent_completions_turns,
-                test_cases=all_test_cases,
-                entry_points=all_entry_points,
+                batch_items=all_batch_items,
                 prompts=all_prompts,
             )
             anchor_size = int(getattr(self.args, "eval_num_samples", len(detailed)))
@@ -450,11 +434,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                 # Keep the full-pool result available to the caller, while
                 # W&B receives only the same fixed anchor as earlier evals.
                 full_rows = [
-                    {
-                        key: value
-                        for key, value in row.items()
-                        if key != "_eval_sample"
-                    }
+                    {key: value for key, value in row.items() if key != "_eval_sample"}
                     for row in detailed
                 ]
                 full_aggregated = self.eval_aggregator(
@@ -471,18 +451,12 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                     }
                 )
                 raw_metrics.update(
-                    {
-                        f"eval/{key}": value
-                        for key, value in anchor_aggregated.items()
-                    }
+                    {f"eval/{key}": value for key, value in anchor_aggregated.items()}
                 )
                 anchor_reward_values = [
-                    row.get("_eval_sample", {}).get("reward")
-                    for row in anchor_rows
+                    row.get("_eval_sample", {}).get("reward") for row in anchor_rows
                 ]
-                if not all(
-                    isinstance(value, Real) for value in anchor_reward_values
-                ):
+                if not all(isinstance(value, Real) for value in anchor_reward_values):
                     raise ValueError(
                         "Every fixed-anchor eval row must contain a numeric reward."
                     )
@@ -523,47 +497,32 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             "required_grounded_recall": "turn_1/required_grounded_recall",
             "entity_grounding_precision": "turn_1/entity_grounding_precision",
             "grounding_f1": "turn_1/grounding_f1",
-            "required_cost_completeness": (
-                "turn_1/required_cost_completeness"
-            ),
+            "required_cost_completeness": ("turn_1/required_cost_completeness"),
             "reference_budget_soft": "turn_1/budget_constraint_soft",
-            "reference_budget_pass": (
-                "turn_1/ultimate/reference_budget_pass"
-            ),
+            "reference_budget_pass": ("turn_1/ultimate/reference_budget_pass"),
             "route_scaffold_match": "turn_1/route_scaffold_match_rate",
-            "reference_plan_delivery": (
-                "turn_1/ultimate/reference_plan_delivery"
-            ),
-            "required_plan_completion": (
-                "turn_1/ultimate/required_plan_completion"
-            ),
+            "reference_plan_delivery": ("turn_1/ultimate/reference_plan_delivery"),
+            "required_plan_completion": ("turn_1/ultimate/required_plan_completion"),
             "reference_commonsense_micro": (
                 "turn_1/ultimate/reference_commonsense_micro"
             ),
             "reference_hard_micro": "turn_1/ultimate/reference_hard_micro",
-            "reference_plan_success": (
-                "turn_1/ultimate/reference_plan_success"
-            ),
-            "collaboration_success": (
-                "turn_1/ultimate/collaboration_success"
-            ),
+            "reference_plan_success": ("turn_1/ultimate/reference_plan_success"),
+            "collaboration_success": ("turn_1/ultimate/collaboration_success"),
         }
         metrics: Dict[str, Any] = {}
         for namespace in ("eval", "eval_full"):
             for output_name, source_suffix in scalar_sources.items():
                 source = f"{namespace}/{source_suffix}"
                 if isinstance(raw_metrics.get(source), Real):
-                    metrics[f"{namespace}/{output_name}"] = float(
-                        raw_metrics[source]
-                    )
+                    metrics[f"{namespace}/{output_name}"] = float(raw_metrics[source])
 
         if self.wandb_initialized and wandb.run is not None:
             # One committed write avoids W&B dropping a second write at the
             # same explicit step. Full-pool results stay in the return value;
             # only the fixed-anchor scalar curves are uploaded.
             wandb_metrics = {
-                key: value for key, value in metrics.items()
-                if key.startswith("eval/")
+                key: value for key, value in metrics.items() if key.startswith("eval/")
             }
             if wandb_metrics:
                 self._log_wandb_eval_metrics(wandb_metrics)
@@ -578,8 +537,10 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
     ) -> None:
         """Allow turn/eval scalars without explicit W&B history-step collisions."""
         allowed = {
-            key: value for key, value in metrics.items()
-            if key.startswith(("turn_1/", "eval/")) and isinstance(value, Real)
+            key: value
+            for key, value in metrics.items()
+            if key.startswith(("turn_1/", "eval/"))
+            and isinstance(value, Real)
             and key != "eval/samples"
         }
         if not allowed:
@@ -712,9 +673,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             assistant_prefix = prefixes[0]
             # The fixed schema/prefix is context rather than a sampled policy
             # token. Reward-facing text is reconstructed after generation.
-            prompts = [
-                prompt + prefix for prompt, prefix in zip(prompts, prefixes)
-            ]
+            prompts = [prompt + prefix for prompt, prefix in zip(prompts, prefixes)]
 
         tokenizer = self.tokenizers[agent_idx]
         prompt_encodings = tokenizer(
@@ -727,10 +686,14 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         skeleton_processor = None
         if getattr(self, "constrain_json_skeleton", False):
             if slot_order_override is not None and len(batch_items) != 1:
-                raise ValueError("A joint Travel slot override requires one input question.")
+                raise ValueError(
+                    "A joint Travel slot override requires one input question."
+                )
             slot_orders = [
                 tuple(
-                    slot_order_override if slot_order_override is not None else ordered_owned_slots(
+                    slot_order_override
+                    if slot_order_override is not None
+                    else ordered_owned_slots(
                         agent_idx,
                         int(item.get("days", 0)),
                     )
@@ -751,9 +714,8 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             kwargs["logits_processor"] = with_fixed_slot_json_processor(
                 kwargs.get("logits_processor"), skeleton_processor
             )
-        if (
-            getattr(self, "_travel_eval_generation", False)
-            and getattr(self, "greedy_eval", True)
+        if getattr(self, "_travel_eval_generation", False) and getattr(
+            self, "greedy_eval", True
         ):
             # Grammar masking must run before argmax so eval chooses the best
             # token that is valid in the current value/skeleton state.

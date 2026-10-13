@@ -175,9 +175,7 @@ def parse_assignments(
     strict_slots = set()
     has_self_duplicate = False
     valid_field_names = (
-        {str(field) for field in valid_fields}
-        if valid_fields is not None
-        else None
+        {str(field) for field in valid_fields} if valid_fields is not None else None
     )
     for raw in raw_items:
         if isinstance(raw, dict) and {"field", "value"}.issubset(raw):
