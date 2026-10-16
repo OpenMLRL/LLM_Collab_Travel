@@ -50,6 +50,8 @@ All entrypoints are in `single_turn/train/` and accept `--config`, `--override`,
 | `train_iac.py`, `train_maac.py` | IAC and MAAC |
 | `train_centralized.py --algorithm <name>` | One model for both roles, with `magrpo`, `madpo`, `madpo_iter`, `marlhf`, or `marlhf_iter` |
 
+For centralized MAGRPO, `single_turn_centralized_native_magrpo_config.yaml` sets `travel.centralized_prompt: native`: one planner prompt that states the request once and asks for one answer per subtask, instead of the concatenated role prompts ([details](docs/task_details.md#native-centralized-prompt-magrpo)).
+
 The preference methods default to one GPU, and one job per GPU is recommended. Their iterative variants compare against a `current_copy` comparator, the current actor with an independent random stream; `history` and `model` comparators are also supported. The defaults use Qwen3-4B-Instruct-2507 agents.
 
 ## Task

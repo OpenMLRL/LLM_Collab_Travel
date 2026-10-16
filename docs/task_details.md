@@ -599,6 +599,36 @@ not yet benchmarked with 4B models on B200. One actor reduces actor/model-state
 memory, but the longer joint context and reward-model phase still need a GPU
 smoke test before assuming a particular generation batch or memory peak.
 
+### Native centralized prompt (MAGRPO)
+
+The default centralized prompt embeds both decentralized role prompts and then
+overrides their agent instructions. `travel.centralized_prompt: native` (set in
+`single_turn_centralized_native_magrpo_config.yaml`) instead writes one planner
+prompt. It states the trip request, constraints, route scaffold, day-slot
+checklists, hard-constraint duties, budget contract and both role catalogs once.
+The planner then gives one answer per subtask, logistics first:
+
+```text
+{"logistics_answer": [{"day": 1, "field": "current_city", "value": "..."}, ...],
+ "experience_answer": [{"day": 1, "field": "breakfast", "value": "..."}, ...]}
+```
+
+The fixed skeleton forces every key and the switch between the two answers, so
+the policy still chooses only values, with the same per-value limit and
+value-only loss. A splitter turns each answer into the unchanged role action, so
+the merger, reward and evaluator are the same as for the two-agent team. With the
+Qwen3 tokenizer, the native prompt has a median of 6.5K tokens, against 8.6K for
+the concatenated prompt and 3.5K + 4.8K for the two role prompts. Native mode is
+implemented for MAGRPO only.
+
+```bash
+python -u single_turn/train/train_centralized.py \
+  --config single_turn/configs/single_turn_centralized_native_magrpo_config.yaml
+```
+
+The MAGRPO and centralized launchers write the final full-pool evaluation (all
+20 held-out rows, `eval_full/*`) to `final_metrics.json` in the run directory.
+
 ## Two-role IAC and MAAC
 
 The actor-critic entrypoints retain the same two role prompts, constrained JSON
