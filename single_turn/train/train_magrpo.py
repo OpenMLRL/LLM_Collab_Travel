@@ -545,7 +545,9 @@ def main() -> None:
     # additional evaluation at the actual final env step so the W&B curve
     # includes the fully trained policy rather than ending one epoch early.
     if _bool(magrpo_section.get("eval_at_end", True), default=True):
-        trainer.evaluate(num_eval_samples=final_eval_samples)
+        metrics = trainer.evaluate(num_eval_samples=final_eval_samples)
+        with open(os.path.join(output_dir, "final_metrics.json"), "w") as handle:
+            handle.write(json.dumps(metrics, indent=2) + "\n")
 
     if _bool(config.get("output.save_final_model", False)):
         for agent_idx, agent in enumerate(trainer.agents):

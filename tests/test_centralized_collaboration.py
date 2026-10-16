@@ -207,7 +207,7 @@ class CentralizedConfigTests(unittest.TestCase):
                 trainer = SimpleNamespace(
                     agents=[actor],
                     train=Mock(),
-                    evaluate=Mock(),
+                    evaluate=Mock(return_value={"eval_full/reward": 0.5}),
                     env_step=0,
                     wandb_initialized=False,
                 )
@@ -260,6 +260,10 @@ class CentralizedConfigTests(unittest.TestCase):
                 trainer.train.assert_called_once()
                 trainer.evaluate.assert_called_once_with(num_eval_samples=1)
                 self.assertEqual(len(list(Path(directory).glob("*/config.yaml"))), 1)
+                (saved,) = Path(directory).glob("*/final_metrics.json")
+                self.assertEqual(
+                    json.loads(saved.read_text()), {"eval_full/reward": 0.5}
+                )
 
     def test_new_configs_are_explicit_and_inherit_domain_budget(self):
         for algorithm in ALGORITHMS:

@@ -644,6 +644,31 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             for item, external in zip(batch_items, external_list)
         ]
 
+    def _travel_assistant_prefill(
+        self, agent_idx: int, batch_item: Dict[str, Any]
+    ) -> str:
+        """Return the fixed assistant prefix for one generation call."""
+
+        return build_agent_json_prefill(agent_idx, int(batch_item.get("days", 0)))
+
+    def _travel_skeleton_processor(
+        self,
+        tokenizer: Any,
+        *,
+        prompt_length: int,
+        slots: List[tuple],
+        max_new_tokens: int,
+    ) -> FixedSlotJSONLogitsProcessor:
+        """Build the grammar that forces every schema token between values."""
+
+        return FixedSlotJSONLogitsProcessor(
+            tokenizer,
+            prompt_length=prompt_length,
+            slots=slots,
+            max_value_tokens=int(getattr(self, "max_value_tokens", 32)),
+            max_new_tokens=max_new_tokens,
+        )
+
     def _generate_completions(
         self,
         agent: Any,
@@ -669,8 +694,7 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                     "travel.force_json_prefix=true requires chat-formatted prompts."
                 )
             prefixes = [
-                build_agent_json_prefill(agent_idx, int(item.get("days", 0)))
-                for item in batch_items
+                self._travel_assistant_prefill(agent_idx, item) for item in batch_items
             ]
             # Every generation call belongs to one agent, whose first role-owned
             # slot is invariant across Travel trip lengths. Keeping this explicit
@@ -714,11 +738,10 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                 raise ValueError(
                     "A constrained generation batch must share one Travel slot order."
                 )
-            skeleton_processor = FixedSlotJSONLogitsProcessor(
+            skeleton_processor = self._travel_skeleton_processor(
                 tokenizer,
                 prompt_length=prompt_length,
                 slots=slot_orders[0],
-                max_value_tokens=int(getattr(self, "max_value_tokens", 32)),
                 max_new_tokens=max_new_tokens,
             )
             kwargs["logits_processor"] = with_fixed_slot_json_processor(

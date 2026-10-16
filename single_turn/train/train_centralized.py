@@ -34,6 +34,22 @@ from single_turn.train.train_mapl import budget_report, make_trainer_args as map
 
 ALGORITHMS = ("magrpo", "madpo", "madpo_iter", "marlhf", "marlhf_iter")
 MAGRPO_EVAL_SETTINGS = {"eval_at_end", "final_eval_num_samples", "rotate_eval_subset"}
+# "concatenated" embeds both role prompts; "native" writes one planner prompt
+# whose response holds one answer per subtask (MAGRPO only).
+CENTRALIZED_PROMPTS = ("concatenated", "native")
+
+
+def centralized_prompt_mode(config):
+    mode = config.get("travel.centralized_prompt", "concatenated")
+    if mode not in CENTRALIZED_PROMPTS:
+        raise ValueError(
+            f"travel.centralized_prompt must be one of {CENTRALIZED_PROMPTS}."
+        )
+    if mode == "native" and config.get("algorithm") != "magrpo":
+        raise ValueError(
+            "travel.centralized_prompt=native is implemented for MAGRPO only."
+        )
+    return mode
 
 
 def load_config(path, seen=()):
@@ -171,6 +187,8 @@ def main():
     args = make_trainer_args(config)
     algorithm = config.get("algorithm")
     magrpo = algorithm == "magrpo"
+    prompt_mode = centralized_prompt_mode(config)
+    native = prompt_mode == "native"
     section_name = "magrpo" if magrpo else "mapl"
     train_rows, eval_rows = _load_data(config)
     final_count = int(
@@ -196,10 +214,20 @@ def main():
         TravelCentralizedCollaborationAdapter,
     )
     from single_turn.centralized_comparator import joint_slots
+    from single_turn.centralized_native import (
+        NATIVE_SECTION_KEYS,
+        TravelNativeCentralizedAdapter,
+    )
+    from single_turn.aggregation import ordered_owned_slots
     from single_turn.formatting import get_single_turn_formatters
     from single_turn.rewards.reference_evaluator import parse_reference_catalog
     from single_turn.rewards import make_reward
 
+    adapter_cls = (
+        TravelNativeCentralizedAdapter
+        if native
+        else TravelCentralizedCollaborationAdapter
+    )
     for row in [*train_rows, *eval_rows]:
         if not parse_reference_catalog(
             str(row.get("reference_information", ""))
@@ -210,6 +238,7 @@ def main():
     report = {
         "algorithm": algorithm,
         "collaboration_mode": "centralized",
+        "centralized_prompt": prompt_mode,
         "num_actor_models": 1,
         "num_roles": 2,
         "agent_devices": args.agent_devices,
@@ -228,18 +257,29 @@ def main():
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if cli.dry_run:
-        adapter = TravelCentralizedCollaborationAdapter()
+        adapter = adapter_cls()
         for row in [*train_rows, *eval_rows]:
             adapter.build_prompt(row, [])
-            joint = json.dumps(
-                {
-                    "agent_id": 0,
-                    "assignments": [
-                        {"day": day, "field": field, "value": "-"}
-                        for day, field in joint_slots(row["days"])
-                    ],
-                }
-            )
+            if native:
+                joint = json.dumps(
+                    {
+                        key: [
+                            {"day": day, "field": field, "value": "-"}
+                            for day, field in ordered_owned_slots(i, row["days"])
+                        ]
+                        for i, key in enumerate(NATIVE_SECTION_KEYS)
+                    }
+                )
+            else:
+                joint = json.dumps(
+                    {
+                        "agent_id": 0,
+                        "assignments": [
+                            {"day": day, "field": field, "value": "-"}
+                            for day, field in joint_slots(row["days"])
+                        ],
+                    }
+                )
             roles = adapter.parse_completion(joint, row, 2)
             reward([roles[0]], [roles[1]], batch_items=[row])
             reward.drain_details()
@@ -261,6 +301,7 @@ def main():
         TravelCentralizedMADPOIterTrainer,
         TravelCentralizedMARLHFTrainer,
         TravelCentralizedMARLHFIterTrainer,
+        TravelNativeCentralizedMAGRPOTrainer,
     )
 
     seed = int(config.get("seed", 42))
@@ -288,12 +329,16 @@ def main():
         wandb_config["dir"] = config.get("wandb.dir") or str(output)
         wandb_config["output_dir"] = str(output)
         wandb_config["name"] = f"{wandb_config['name']}-seed{seed}"
-    adapter = TravelCentralizedCollaborationAdapter(tokenizer)
+    adapter = adapter_cls(tokenizer)
     trainers = dict(
         zip(
             ALGORITHMS,
             (
-                TravelCentralizedMAGRPOTrainer,
+                (
+                    TravelNativeCentralizedMAGRPOTrainer
+                    if native
+                    else TravelCentralizedMAGRPOTrainer
+                ),
                 TravelCentralizedMADPOTrainer,
                 TravelCentralizedMADPOIterTrainer,
                 TravelCentralizedMARLHFTrainer,
@@ -362,7 +407,8 @@ def main():
         )
     trainer.train(**checkpoint_options)
     if _bool(config.get("magrpo.eval_at_end" if magrpo else "evaluation.at_end", True)):
-        trainer.evaluate(num_eval_samples=final_count)
+        metrics = trainer.evaluate(num_eval_samples=final_count)
+        (output / "final_metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     print(
         f"Finished centralized {algorithm}: env_steps={trainer.env_step}, actor_models={len(trainer.agents)}"
     )

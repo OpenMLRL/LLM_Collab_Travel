@@ -1,0 +1,10 @@
+# Opt-in native joint prompt: one planner states the task once and answers the
+# logistics subtask, then the experience subtask, in one response.
+extends: single_turn_centralized_magrpo_config.yaml
+travel:
+  centralized_prompt: native
+output:
+  base_dir: output_single_turn_centralized_native_magrpo
+wandb:
+  name: travel-magrpo-cenactor-native
+  tags: [travelplanner, magrpo, centralized-collaboration, joint-actor, native-prompt, fixed-reward]

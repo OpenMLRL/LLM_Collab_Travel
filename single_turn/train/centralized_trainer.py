@@ -4,7 +4,11 @@ from comlrl.trainers.reinforce import CentralizedMAGRPOTrainer
 from comlrl.utils.distributed import unwrap_model
 
 from single_turn.centralized_comparator import joint_slots
-from single_turn.formatting import build_agent_json_prefill
+from single_turn.centralized_native import (
+    SectionedFixedSlotJSONLogitsProcessor,
+    build_native_prefill,
+    native_slots,
+)
 from single_turn.train.preference_trainer import (
     TravelMADPOTrainer,
     TravelMADPOIterTrainer,
@@ -63,7 +67,7 @@ class TravelCentralizedActorMixin:
         tokenizer = self.tokenizers[0]
         prompt_length = len(
             tokenizer.encode(
-                prompts[0] + build_agent_json_prefill(0, batch_items[0]["days"]),
+                prompts[0] + self._travel_assistant_prefill(0, batch_items[0]),
                 add_special_tokens=True,
             )
         )
@@ -87,9 +91,12 @@ class TravelCentralizedActorMixin:
             max_new_tokens=max_new_tokens,
             prompts_override=prompts,
             external_prompts=None,
-            slot_order_override=joint_slots(batch_items[0]["days"]),
+            slot_order_override=self._centralized_slot_order(batch_items[0]["days"]),
             **kwargs,
         )
+
+    def _centralized_slot_order(self, days):
+        return joint_slots(days)
 
     def _log_eval_metrics(self, all_agent_completions_turns, *args, **kwargs):
         # Travel's compact logger precedes the core logger in the MRO. Split
@@ -150,6 +157,35 @@ class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
 
 class TravelCentralizedMAGRPOTrainer(
     TravelCentralizedActorMixin, StructuredOutputMAGRPOTrainer, CentralizedMAGRPOTrainer
+):
+    pass
+
+
+class TravelNativeCentralizedActorMixin(TravelCentralizedActorMixin):
+    """Generate the logistics answer, then the experience answer, in one call."""
+
+    def _centralized_slot_order(self, days):
+        return native_slots(days)
+
+    def _travel_assistant_prefill(self, agent_idx, batch_item):
+        return build_native_prefill(int(batch_item.get("days", 0)))
+
+    def _travel_skeleton_processor(
+        self, tokenizer, *, prompt_length, slots, max_new_tokens
+    ):
+        return SectionedFixedSlotJSONLogitsProcessor(
+            tokenizer,
+            prompt_length=prompt_length,
+            slots=slots,
+            max_value_tokens=int(getattr(self, "max_value_tokens", 32)),
+            max_new_tokens=max_new_tokens,
+        )
+
+
+class TravelNativeCentralizedMAGRPOTrainer(
+    TravelNativeCentralizedActorMixin,
+    StructuredOutputMAGRPOTrainer,
+    CentralizedMAGRPOTrainer,
 ):
     pass
 
