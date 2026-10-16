@@ -21,6 +21,7 @@ for path in (COMLRL_ROOT, REPO_ROOT):
         sys.path.insert(0, str(path))
 
 from single_turn.config import Config, add_config_args, parse_overrides, run_id
+from single_turn.train.checkpoint_launch import checkpoint_train_kwargs
 from single_turn.train.train_magrpo import (
     _agent_names,
     _bool,
@@ -159,6 +160,7 @@ def main():
     )
     overrides = parse_overrides(cli.override)
     config.update(overrides)
+    checkpoint_options = checkpoint_train_kwargs(config)
     if cli.algorithm and config.get("algorithm") != cli.algorithm:
         raise ValueError("--algorithm and config.algorithm disagree.")
     wrong_section = "mapl" if config.get("algorithm") == "magrpo" else "magrpo"
@@ -358,7 +360,7 @@ def main():
         trainer.agents[0].gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
-    trainer.train()
+    trainer.train(**checkpoint_options)
     if _bool(config.get("magrpo.eval_at_end" if magrpo else "evaluation.at_end", True)):
         trainer.evaluate(num_eval_samples=final_count)
     print(

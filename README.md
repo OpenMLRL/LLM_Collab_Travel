@@ -646,6 +646,29 @@ held-out rows; final evaluation saves all 20 in `final_metrics.json`, under
 `eval_full/*`, while W&B keeps `eval/*` on the fixed four-row anchor. Final model
 export retains both actors and their independent/shared value heads.
 
+## Training checkpoints
+
+Checkpointing is optional for all training entrypoints. Users can add a top-level
+`checkpoint` section to their YAML configuration:
+
+```yaml
+checkpoint:
+  checkpoint_dir: ./checkpoints/travel
+  checkpoint_interval: 1
+  checkpoint_total_limit: 2
+  # resume_from_checkpoint: ./checkpoints/travel/checkpoint-1
+```
+
+The same options work through `--override checkpoint.resume_from_checkpoint=...`.
+Without this section, training writes no training checkpoints. New experiments
+use an unused checkpoint directory; resuming can continue in the original one.
+
+With W&B enabled, a resumed launch reads the saved run's `id`, `project`, and
+`entity` before constructing the trainer and uses `resume="allow"`. Explicit
+`wandb.id` or `wandb.resume` settings take precedence. Disabled W&B and checkpoints
+without a saved W&B identity keep their configured logging behavior. This requires
+a CoMLRL version providing `read_checkpoint_metadata`.
+
 ## Tests
 
 The tests require no pretrained model download; preference-loop tests use tiny

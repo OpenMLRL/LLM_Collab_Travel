@@ -34,6 +34,10 @@ from single_turn.rewards import make_reward
 from single_turn.rewards.reference_evaluator import parse_reference_catalog
 from single_turn.rewards.single_turn_reward import score_single_turn_response
 from single_turn.structured_generation import DEFAULT_SYSTEM_PROMPT
+from single_turn.train.checkpoint_launch import (
+    checkpoint_train_kwargs,
+    prepare_wandb_config,
+)
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -101,7 +105,7 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
     section = config.get_section("wandb")
     if not _bool(section.get("enabled", True), default=True):
         return None
-    return {
+    wandb_config = {
         "project": section.get("project"),
         "entity": section.get("entity", "OpenMLRL"),
         "name": section.get("name", "single_turn_magrpo"),
@@ -118,6 +122,7 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
             "trainer": trainer_cfg,
         },
     }
+    return prepare_wandb_config(config, wandb_config, checkpoint_train_kwargs(config))
 
 
 def _contract_probe_completions(batch_item: Dict[str, Any]) -> List[str]:
@@ -321,6 +326,7 @@ def main() -> None:
     config = Config(args.config or str(DEFAULT_CONFIG))
     if args.override:
         config.update(parse_overrides(args.override))
+    checkpoint_options = checkpoint_train_kwargs(config)
 
     train_rows, eval_rows = _load_data(config)
     curriculum = _curriculum_plan(config, train_rows)
@@ -533,7 +539,7 @@ def main() -> None:
                 )
             except TypeError:
                 agent.gradient_checkpointing_enable()
-    trainer.train()
+    trainer.train(**checkpoint_options)
 
     # The periodic schedule evaluates at the start of each epoch. Log one
     # additional evaluation at the actual final env step so the W&B curve

@@ -120,6 +120,16 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
             self._travel_training_active = False
             self._travel_curriculum_stage = 1
 
+    def _on_checkpoint_train_start(self, start_epoch: int, total_epochs: int) -> None:
+        """Continue the curriculum at the restored complete-epoch boundary."""
+
+        super()._on_checkpoint_train_start(start_epoch, total_epochs)
+        if self._travel_training_active:
+            self._travel_train_epoch_cursor = start_epoch
+            self._travel_curriculum_stage = int(
+                start_epoch >= self.curriculum_short_epochs
+            )
+
     def get_train_dataloader(self) -> Any:
         """Select the short-trip dataset only for the configured first epochs."""
 
