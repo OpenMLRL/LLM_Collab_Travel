@@ -12,7 +12,7 @@ mapl:
   preference_replay_lambda: 0.8
   log_reward_distribution: true
   # MADPO measures this interval in optimizer updates, unlike online MAGRPO.
-  eval_interval: 12
+  eval_interval: 6
 output:
   base_dir: output_single_turn_madpo_iter
 wandb:

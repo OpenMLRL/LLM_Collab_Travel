@@ -252,8 +252,11 @@ unchanged.
 
 Periodic evaluation uses greedy argmax generation on the same P1 examples;
 training generation remains stochastic. This removes sampling noise from the
-within-run anchor comparison. The short curriculum evaluates every 120 env
-steps and the full phase every 240 env steps. Because the training distribution
+within-run anchor comparison. Evaluation runs every 30 prompts of an epoch,
+which is every 120 env steps in both the short and the full phase. The other
+algorithms use the same within-epoch interval (MADPO counts 6 optimizer updates
+instead). Runs started before this change used 60 (MAGRPO: 120 env steps in the
+short phase, 240 in the full phase) and 12 for MADPO. Because the training distribution
 changes at step 960, the fixed held-out eval curve—not a smoothed cross-phase
 training average—is the primary convergence curve.
 

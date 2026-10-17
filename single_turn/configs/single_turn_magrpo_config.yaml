@@ -125,7 +125,9 @@ magrpo:
   advantage_mode: mean
   # Re-evaluate the same balanced four-row anchor panel so adjacent W&B points
   # are comparable. The terminal evaluation still uses the full 20-row pool.
-  eval_interval: 60
+  # An eval every 30 prompts of an epoch gives one point per 120 env steps in
+  # both the 30-row short phase and the 60-row full phase.
+  eval_interval: 30
   eval_num_samples: 4
   rotate_eval_subset: false
   final_eval_num_samples: 20
