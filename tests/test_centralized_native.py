@@ -19,9 +19,9 @@ for path in (ROOT.parent / "CoMLRL", ROOT):
 import torch
 from transformers import GPT2LMHeadModel
 
-from comlrl.trainers.preference.centralized import CentralizedComparatorParseError
-from comlrl.trainers.preference.collaboration import CentralizedCollaboration
-from comlrl.trainers.reinforce import CentralizedMAGRPOConfig
+from comlrl.trainers.centralized import CentralizedComparatorParseError
+from comlrl.trainers.centralized import CentralizedCollaboration
+from comlrl.trainers.reinforce import MAGRPOConfig
 from single_turn.aggregation import ordered_owned_slots
 from single_turn.centralized_collaboration import TravelCentralizedCollaborationAdapter
 from single_turn.centralized_native import (
@@ -89,7 +89,7 @@ def make_native_trainer(**overrides):
         agents=[GPT2LMHeadModel(tiny_config())],
         tokenizer=TinyTokenizer(),
         num_agents=2,
-        args=CentralizedMAGRPOConfig(**options),
+        args=MAGRPOConfig(**options),
         reward_func=make_reward(),
         train_dataset=[fixture_item()],
         eval_dataset=[fixture_item()],

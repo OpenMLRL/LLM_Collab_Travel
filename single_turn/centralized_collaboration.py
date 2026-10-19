@@ -1,6 +1,6 @@
 """Joint-policy adapter, separate from the two-actor comparator-only path."""
 
-from comlrl.trainers.preference.centralized import CentralizedComparatorParseError
+from comlrl.trainers.centralized import CentralizedComparatorParseError
 
 from single_turn.centralized_comparator import TravelCentralizedComparatorAdapter
 from single_turn.formatting import wrap_formatter_with_chat_template

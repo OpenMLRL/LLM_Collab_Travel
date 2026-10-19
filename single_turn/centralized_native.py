@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
-from comlrl.trainers.preference.centralized import CentralizedComparatorParseError
+from comlrl.trainers.centralized import CentralizedComparatorParseError
 
 from single_turn.aggregation import PLAN_FIELDS, ordered_owned_slots, slot_owner
 from single_turn.formatting import (

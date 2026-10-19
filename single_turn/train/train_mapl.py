@@ -46,7 +46,7 @@ def load_config(path, seen=()):
 
 
 def make_trainer_args(config):
-    from comlrl.trainers.preference import (
+    from comlrl.trainers.pbrl import (
         MADPOConfig,
         MADPOIterConfig,
         MARLHFConfig,

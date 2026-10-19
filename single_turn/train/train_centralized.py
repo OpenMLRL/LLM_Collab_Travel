@@ -68,8 +68,8 @@ def load_config(path, seen=()):
 
 def make_trainer_args(config):
     try:
-        from comlrl.trainers.reinforce import CentralizedMAGRPOConfig
-        from comlrl.trainers.preference import MADPOConfig
+        from comlrl.trainers.reinforce import MAGRPOConfig
+        from comlrl.trainers.pbrl import MADPOConfig
 
         if "collaboration_mode" not in {field.name for field in fields(MADPOConfig)}:
             raise ImportError("CoMLRL is missing centralized preference actors")
@@ -120,13 +120,15 @@ def make_trainer_args(config):
 
     if config.get_section("mapl"):
         raise ValueError("Use magrpo.* settings for centralized MAGRPO, not mapl.*.")
-    field_names = {field.name for field in fields(CentralizedMAGRPOConfig)}
+    field_names = {field.name for field in fields(MAGRPOConfig)}
     unknown = set(section) - field_names - MAGRPO_EVAL_SETTINGS
     if unknown:
         raise ValueError(f"Unknown magrpo settings: {sorted(unknown)}")
     model = config.get_agent_model_config()
-    args = CentralizedMAGRPOConfig(
+    args = MAGRPOConfig(
         **{
+            # Centralized MAGRPO is single-turn unless the config says otherwise.
+            "num_turns": 1,
             "temperature": model.temperature,
             "top_p": model.top_p,
             "top_k": model.top_k,

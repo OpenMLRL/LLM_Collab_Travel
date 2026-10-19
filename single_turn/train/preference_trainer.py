@@ -19,13 +19,13 @@ import torch.nn.functional as F
 import wandb
 from transformers import AutoModel, AutoTokenizer
 
-from comlrl.trainers.preference import (
+from comlrl.trainers.pbrl import (
     MADPOTrainer,
     MADPOIterTrainer,
     MARLHFIterTrainer,
     MARLHFTrainer,
 )
-from comlrl.trainers.preference.madpo import AgentPreferenceTensors, PreferencePair
+from comlrl.trainers.pbrl.madpo import AgentPreferenceTensors, PreferencePair
 from comlrl.utils.distributed import unwrap_model
 from comlrl.utils.tokenizer_utils import ensure_pad_token
 from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer

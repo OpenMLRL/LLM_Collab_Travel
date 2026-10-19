@@ -1,6 +1,5 @@
 """Opt-in centralized actors; existing Travel trainers are not modified."""
 
-from comlrl.trainers.reinforce import CentralizedMAGRPOTrainer
 from comlrl.utils.distributed import unwrap_model
 
 from single_turn.centralized_comparator import joint_slots
@@ -98,13 +97,13 @@ class TravelCentralizedActorMixin:
     def _centralized_slot_order(self, days):
         return joint_slots(days)
 
-    def _log_eval_metrics(self, all_agent_completions_turns, *args, **kwargs):
+    def _log_eval_metrics(
+        self, all_agent_completions_turns, all_batch_items, *args, **kwargs
+    ):
         # Travel's compact logger precedes the core logger in the MRO. Split
-        # here exactly once, using the items recorded by the core eval loop.
-        roles = self.centralized_collaboration.split_eval(
-            all_agent_completions_turns, self._centralized_eval_items
-        )
-        return super()._log_eval_metrics(roles, *args, **kwargs)
+        # here exactly once, using the items collected by the core eval loop.
+        roles = self._role_completions(all_agent_completions_turns, all_batch_items)
+        return super()._log_eval_metrics(roles, all_batch_items, *args, **kwargs)
 
 
 class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
@@ -156,7 +155,7 @@ class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
 
 
 class TravelCentralizedMAGRPOTrainer(
-    TravelCentralizedActorMixin, StructuredOutputMAGRPOTrainer, CentralizedMAGRPOTrainer
+    TravelCentralizedActorMixin, StructuredOutputMAGRPOTrainer
 ):
     pass
 
@@ -185,7 +184,6 @@ class TravelNativeCentralizedActorMixin(TravelCentralizedActorMixin):
 class TravelNativeCentralizedMAGRPOTrainer(
     TravelNativeCentralizedActorMixin,
     StructuredOutputMAGRPOTrainer,
-    CentralizedMAGRPOTrainer,
 ):
     pass
 
