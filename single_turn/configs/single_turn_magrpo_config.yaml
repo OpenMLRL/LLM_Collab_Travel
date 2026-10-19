@@ -123,6 +123,8 @@ magrpo:
   train_batch_size: 10
   advantage_normalization: false
   advantage_mode: mean
+  # Skip optimizer steps whose gradients are all zero (every advantage zero).
+  skip_zero_grad_steps: true
   # Re-evaluate the same balanced four-row anchor panel so adjacent W&B points
   # are comparable. The terminal evaluation still uses the full 20-row pool.
   # An eval every 30 prompts of an epoch gives one point per 120 env steps in

@@ -456,6 +456,9 @@ def main() -> None:
             magrpo_section.get("advantage_normalization", True), default=True
         ),
         advantage_mode=str(magrpo_section.get("advantage_mode", "mean")),
+        skip_zero_grad_steps=_bool(
+            magrpo_section.get("skip_zero_grad_steps", False), default=False
+        ),
         eval_interval=int(magrpo_section.get("eval_interval", 40)),
         eval_num_samples=int(magrpo_section.get("eval_num_samples", 4)),
         eval_batch_size=int(magrpo_section.get("eval_batch_size", 1)),
