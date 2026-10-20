@@ -295,8 +295,11 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         adapter = self.centralized_comparator_adapter
         days = batch_item["days"]
         prefill = adapter.assistant_prefill(days)
-        # The joint teacher has the same aggregate token budget as two role calls.
-        budget = self.num_agents * int(self.args.max_new_tokens)
+        # The joint teacher gets the role calls' aggregate budget unless the
+        # config sets its own.
+        budget = getattr(
+            self.args, "comparator_centralized_max_new_tokens", None
+        ) or self.num_agents * int(self.args.max_new_tokens)
         input_length = len(
             self.tokenizers[0].encode(prompt + prefill, add_special_tokens=False)
         )
@@ -712,7 +715,7 @@ class TravelRewardModelMixin:
         for idx, prompt in enumerate(prompts):
             # The prefill is independent of trip length. Remove only a trailing
             # prefill, never JSON examples embedded in the role instructions.
-            prefix = build_agent_json_prefill(idx, 3)
+            prefix = self._travel_assistant_prefill(idx, {"days": 3})
             contexts.append(
                 prompt[: -len(prefix)] if prompt.endswith(prefix) else prompt
             )

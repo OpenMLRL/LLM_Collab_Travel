@@ -210,3 +210,19 @@ class TravelCentralizedMARLHFIterTrainer(
     TravelCentralizedPreferenceMixin, TravelMARLHFIterTrainer
 ):
     pass
+
+
+class TravelNativeCentralizedMADPOIterTrainer(
+    TravelNativeCentralizedActorMixin,
+    TravelCentralizedPreferenceMixin,
+    TravelMADPOIterTrainer,
+):
+    pass
+
+
+class TravelNativeCentralizedMARLHFIterTrainer(
+    TravelNativeCentralizedActorMixin,
+    TravelCentralizedPreferenceMixin,
+    TravelMARLHFIterTrainer,
+):
+    pass

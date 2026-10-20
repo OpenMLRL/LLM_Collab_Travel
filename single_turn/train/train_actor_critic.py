@@ -15,7 +15,7 @@ for path in (REPO_ROOT.parent / "CoMLRL", REPO_ROOT):
 
 from single_turn.config import add_config_args, parse_overrides, run_id
 from single_turn.train.checkpoint_launch import parse_checkpoint_options
-from single_turn.train.train_centralized import load_config
+from single_turn.train.train_centralized import centralized_prompt_mode, load_config
 from single_turn.train.train_magrpo import (
     _agent_names,
     _bool,
@@ -66,6 +66,7 @@ def make_trainer_args(config):
             raise ValueError(f"Travel actor-critic requires travel.{flag}=true.")
     if config.get("travel.role_mode") != "partitioned_roles":
         raise ValueError("Travel actor-critic requires partitioned_roles.")
+    centralized_prompt_mode(config)
     return args
 
 
@@ -137,12 +138,14 @@ def main(default_algorithm=None):
     torch.cuda.manual_seed_all(seed)
     model = config.get_agent_model_config()
     names = _agent_names(config)
-    if names is not None and len(names) != 2:
+    centralized = args.collaboration_mode == "centralized"
+    actors = 1 if centralized else 2
+    if names is not None and len(names) != actors:
         raise ValueError(
-            "Travel actor-critic requires exactly two actor model sources."
+            f"Travel actor-critic requires exactly {actors} actor model source(s)."
         )
     tokenizers = [
-        AutoTokenizer.from_pretrained(name) for name in (names or [model.name] * 2)
+        AutoTokenizer.from_pretrained(name) for name in (names or [model.name] * actors)
     ]
     for tokenizer in tokenizers:
         if tokenizer.pad_token is None:
@@ -171,6 +174,21 @@ def main(default_algorithm=None):
         "torch_dtype": critic.torch_dtype,
         "attn_implementation": critic.attn_implementation,
     }
+    collaboration = {}
+    if centralized:
+        from single_turn.centralized_collaboration import (
+            TravelCentralizedCollaborationAdapter,
+        )
+        from single_turn.centralized_native import TravelNativeCentralizedAdapter
+
+        adapter_cls = (
+            TravelNativeCentralizedAdapter
+            if centralized_prompt_mode(config) == "native"
+            else TravelCentralizedCollaborationAdapter
+        )
+        collaboration["centralized_adapter"] = adapter_cls(tokenizers[0])
+    # The critic always reads the two chat-formatted role prompts.
+    role_tokenizers = tokenizers * 2 if centralized else tokenizers
     cls = TravelIACTrainer if algorithm == "iac" else TravelMAACTrainer
     trainer = cls(
         agent_model=model.name if names is None else None,
@@ -178,7 +196,7 @@ def main(default_algorithm=None):
         critic_model=(
             critic.name if algorithm == "maac" or args.use_separate_critic else None
         ),
-        tokenizer=tokenizers,
+        tokenizer=tokenizers[0] if centralized else tokenizers,
         args=args,
         model_config={
             "model_kwargs": model_kwargs,
@@ -188,7 +206,7 @@ def main(default_algorithm=None):
         reward_processor=_build_reward_processor(config),
         formatters=get_single_turn_formatters(
             num_agents=2,
-            tokenizers=tokenizers,
+            tokenizers=role_tokenizers,
             use_chat_template=True,
             system_prompt=config.get("travel.system_prompt", DEFAULT_SYSTEM_PROMPT),
         ),
@@ -197,6 +215,7 @@ def main(default_algorithm=None):
         wandb_config=wandb_config,
         max_value_tokens=int(config.get("travel.max_value_tokens", 32)),
         greedy_eval=_bool(config.get("travel.greedy_eval", True)),
+        **collaboration,
     )
     trainer.verbose = _bool(config.get("output.verbose", True))
     if _bool(config.get("agent_model.gradient_checkpointing", True)):

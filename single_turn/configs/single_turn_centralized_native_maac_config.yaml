@@ -1,0 +1,10 @@
+# Opt-in native joint prompt for MAAC: one planner answers the logistics subtask,
+# then the experience subtask, in one response.
+extends: single_turn_centralized_maac_config.yaml
+travel:
+  centralized_prompt: native
+output:
+  base_dir: output_single_turn_centralized_native_maac
+wandb:
+  name: travel-maac-cenactor-native
+  tags: [travelplanner, maac, centralized-collaboration, joint-actor, native-prompt, shared-critic]

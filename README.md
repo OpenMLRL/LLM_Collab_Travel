@@ -50,7 +50,7 @@ All entrypoints are in `single_turn/train/` and accept `--config`, `--override`,
 | `train_iac.py`, `train_maac.py` | IAC and MAAC |
 | `train_centralized.py --algorithm <name>` | One model for both roles, with `magrpo`, `madpo`, `madpo_iter`, `marlhf`, or `marlhf_iter` |
 
-For centralized MAGRPO, `single_turn_centralized_native_magrpo_config.yaml` sets `travel.centralized_prompt: native`: one planner prompt that states the request once and asks for one answer per subtask, instead of the concatenated role prompts ([details](docs/task_details.md#native-centralized-prompt-magrpo)).
+For centralized MAGRPO, `single_turn_centralized_native_magrpo_config.yaml` sets `travel.centralized_prompt: native`: one planner prompt that states the request once and asks for one answer per subtask, instead of the concatenated role prompts ([details](docs/task_details.md#native-centralized-prompt-magrpo)). The same switch works for the joint actors of MAAC (`single_turn_centralized_maac_config.yaml` and its `_native_` variant) and of iterative MADPO and MARLHF (`single_turn_centralized_native_madpo_iter_config.yaml`, `single_turn_centralized_native_marlhf_iter_config.yaml`), whose comparator then answers the native prompt too.
 
 The preference methods default to one GPU, and one job per GPU is recommended. Their iterative variants compare against a `current_copy` comparator, the current actor with an independent random stream; `history` and `model` comparators are also supported. With `mapl.comparator_generation_mode=centralized`, one centralized comparator writes both roles' slots, from the concatenated role prompts by default or from the native planner prompt with `travel.centralized_prompt=native`. The defaults use Qwen3-4B-Instruct-2507 agents.
 

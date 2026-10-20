@@ -38,6 +38,8 @@ from single_turn.train.train_mapl import (
 
 ALGORITHMS = ("magrpo", "madpo", "madpo_iter", "marlhf", "marlhf_iter")
 MAGRPO_EVAL_SETTINGS = {"eval_at_end", "final_eval_num_samples", "rotate_eval_subset"}
+# Algorithms whose joint actor can answer the native prompt.
+NATIVE_ALGORITHMS = ("magrpo", "madpo_iter", "marlhf_iter", "iac", "maac")
 
 
 def centralized_prompt_mode(config):
@@ -46,10 +48,10 @@ def centralized_prompt_mode(config):
         raise ValueError(
             f"travel.centralized_prompt must be one of {CENTRALIZED_PROMPTS}."
         )
-    if mode == "native" and config.get("algorithm") != "magrpo":
+    if mode == "native" and config.get("algorithm") not in NATIVE_ALGORITHMS:
         raise ValueError(
-            "travel.centralized_prompt=native is implemented for the MAGRPO actor "
-            "and for train_mapl.py's centralized comparator only."
+            "travel.centralized_prompt=native is implemented for the joint actors "
+            f"of {', '.join(NATIVE_ALGORITHMS)} and train_mapl.py's comparator."
         )
     return mode
 
@@ -305,7 +307,9 @@ def main():
         TravelCentralizedMADPOIterTrainer,
         TravelCentralizedMARLHFTrainer,
         TravelCentralizedMARLHFIterTrainer,
+        TravelNativeCentralizedMADPOIterTrainer,
         TravelNativeCentralizedMAGRPOTrainer,
+        TravelNativeCentralizedMARLHFIterTrainer,
     )
 
     seed = int(config.get("seed", 42))
@@ -344,9 +348,17 @@ def main():
                     else TravelCentralizedMAGRPOTrainer
                 ),
                 TravelCentralizedMADPOTrainer,
-                TravelCentralizedMADPOIterTrainer,
+                (
+                    TravelNativeCentralizedMADPOIterTrainer
+                    if native
+                    else TravelCentralizedMADPOIterTrainer
+                ),
                 TravelCentralizedMARLHFTrainer,
-                TravelCentralizedMARLHFIterTrainer,
+                (
+                    TravelNativeCentralizedMARLHFIterTrainer
+                    if native
+                    else TravelCentralizedMARLHFIterTrainer
+                ),
             ),
         )
     )
