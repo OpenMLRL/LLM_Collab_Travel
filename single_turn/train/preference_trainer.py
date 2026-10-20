@@ -26,6 +26,7 @@ from comlrl.trainers.pbrl import (
     MARLHFTrainer,
 )
 from comlrl.trainers.pbrl.madpo import AgentPreferenceTensors, PreferencePair
+from comlrl.utils.checkpoint import register_checkpoint_record
 from comlrl.utils.distributed import unwrap_model
 from comlrl.utils.tokenizer_utils import ensure_pad_token
 from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer
@@ -34,6 +35,7 @@ from single_turn.centralized_comparator import project_role_tokens
 from single_turn.structured_generation import wrap_formatter_with_chat_template
 
 
+@register_checkpoint_record
 @dataclass
 class TravelPreferenceTensors(AgentPreferenceTensors):
     winner_loss_mask: torch.Tensor
@@ -92,7 +94,10 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if int(self.args.eval_interval) > 0:
             self.evaluate(num_eval_samples=int(self.args.eval_num_samples))
         result = self._train_preference_algorithm(**kwargs)
-        if self.preference_pairs_generated == 0:
+        # The counter covers this process only. A resumed segment may reuse pairs
+        # generated before its checkpoint, so only a fresh run is judged here.
+        resumed = kwargs.get("resume_from_checkpoint") is not None
+        if self.preference_pairs_generated == 0 and not resumed:
             raise RuntimeError(
                 "No non-tied Travel preferences were generated; no training occurred. Increase preference_num_candidates or inspect the candidate rewards."
             )

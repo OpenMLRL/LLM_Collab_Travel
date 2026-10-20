@@ -132,7 +132,11 @@ class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
                 [batch_item],
                 agent_idx=0,
                 num_return_sequences=num_candidates,
-                max_new_tokens=self.args.max_new_tokens,
+                # As in CoMLRL, a set comparator budget replaces max_new_tokens.
+                max_new_tokens=getattr(
+                    self.args, "comparator_centralized_max_new_tokens", None
+                )
+                or self.args.max_new_tokens,
                 prompts_override=[prompt],
                 **kwargs,
             )

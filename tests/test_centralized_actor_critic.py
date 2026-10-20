@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 import io
 import json
 from pathlib import Path
@@ -25,8 +25,13 @@ from single_turn.centralized_native import (
 from single_turn.rewards import make_reward
 from single_turn.train.actor_critic_trainer import TravelMAACTrainer
 from single_turn.train.centralized_trainer import (
+    TravelCentralizedMADPOIterTrainer,
     TravelNativeCentralizedMADPOIterTrainer,
     TravelNativeCentralizedMARLHFIterTrainer,
+)
+from single_turn.train.preference_trainer import (
+    TravelMADPOIterTrainer,
+    TravelPreferenceTensors,
 )
 from test_actor_critic import ACTokenizer
 from test_centralized_collaboration import TinyTokenizer
@@ -255,6 +260,64 @@ class NativeCentralizedPreferenceTests(unittest.TestCase):
                     TravelNativeCentralizedAdapter,
                 )
                 trainer.train.assert_called_once()
+
+
+class PreferenceReviewFixTests(unittest.TestCase):
+    def test_joint_actor_comparator_honours_its_own_budget(self):
+        for cls in (
+            TravelCentralizedMADPOIterTrainer,
+            TravelNativeCentralizedMADPOIterTrainer,
+        ):
+            for budget, expected in ((None, 2048), (3000, 3000)):
+                trainer = cls.__new__(cls)
+                trainer.agents = [SimpleNamespace()]
+                trainer.args = SimpleNamespace(
+                    max_new_tokens=2048, comparator_centralized_max_new_tokens=budget
+                )
+                seen = []
+
+                def generate(*args, **kwargs):
+                    seen.append(kwargs["max_new_tokens"])
+                    return {"completions": [[]]}
+
+                with patch.object(
+                    trainer, "_offload_actors", return_value=nullcontext()
+                ), patch.object(
+                    trainer, "_comparator_rng", return_value=nullcontext()
+                ), patch.object(
+                    trainer, "_generate_completions", side_effect=generate
+                ):
+                    trainer._generate_centralized_policy_output_for_agent(
+                        trainer.agents[0], {"days": 3}, prompt="joint", num_candidates=2
+                    )
+                self.assertEqual(seen, [expected])
+
+    def test_travel_preference_tensors_round_trip_through_checkpoints(self):
+        from comlrl.utils.checkpoint import _decode, _encode
+
+        tensors = TravelPreferenceTensors(
+            prompt_input_ids=torch.tensor([1, 2]),
+            winner_completion_ids=torch.tensor([3]),
+            loser_completion_ids=torch.tensor([4]),
+            winner_loss_mask=torch.tensor([True]),
+            loser_loss_mask=torch.tensor([False]),
+        )
+        restored = _decode(_encode(tensors))
+        self.assertIsInstance(restored, TravelPreferenceTensors)
+        self.assertTrue(
+            torch.equal(restored.prompt_input_ids, tensors.prompt_input_ids)
+        )
+        self.assertTrue(torch.equal(restored.loser_loss_mask, tensors.loser_loss_mask))
+
+    def test_only_a_fresh_run_is_judged_by_its_own_pair_count(self):
+        trainer = TravelMADPOIterTrainer.__new__(TravelMADPOIterTrainer)
+        trainer.args = SimpleNamespace(eval_interval=0)
+        trainer.preference_pairs_generated = 0
+        trainer._train_preference_algorithm = lambda **kwargs: "trained"
+        with self.assertRaisesRegex(RuntimeError, "no training occurred"):
+            trainer.train()
+        resumed = trainer.train(resume_from_checkpoint="run/checkpoint-3")
+        self.assertEqual(resumed, "trained")
 
 
 if __name__ == "__main__":

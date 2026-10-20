@@ -102,7 +102,7 @@ def main(default_algorithm=None):
         )
     report = dict(
         algorithm=algorithm,
-        actor_models=2,
+        actor_models=1 if args.collaboration_mode == "centralized" else 2,
         num_roles=2,
         critic="independent" if algorithm == "iac" else "centralized",
         train_samples=len(train_rows),
