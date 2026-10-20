@@ -423,6 +423,12 @@ projections are encoded under each actor's own prompt with value/schema masks;
 native role generations retain their exact sampled token trajectories. Neither
 path reads `annotated_plan` or `gold_plan`.
 
+By default the teacher answers the concatenated role prompts.
+`travel.centralized_prompt=native` gives it the
+[native planner prompt](#native-centralized-prompt-magrpo) instead, with the native
+MAGRPO actor's system prompt, assistant prefill, logistics-then-experience slot
+order and sectioned grammar; its two answers become the same role actions.
+
 For comparator ablations, use BFCL-style names such as
 `travel-marlhf-iter-central-currentcmp-seed42` (centralized) and
 `travel-marlhf-iter-currentcmp-seed42` (decentralized). Other teacher labels

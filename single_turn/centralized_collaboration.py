@@ -15,6 +15,8 @@ CENTRAL_SYSTEM_PROMPT = (
 class TravelCentralizedCollaborationAdapter(TravelCentralizedComparatorAdapter):
     """One chat prompt and joint action; split only at the task boundary."""
 
+    system_prompt = CENTRAL_SYSTEM_PROMPT
+
     def __init__(self, tokenizer=None):
         self.tokenizer = tokenizer
 
@@ -23,7 +25,7 @@ class TravelCentralizedCollaborationAdapter(TravelCentralizedComparatorAdapter):
         if self.tokenizer is None:
             return raw  # Data/contract dry runs do not need model downloads.
         formatter = wrap_formatter_with_chat_template(
-            lambda item: raw, self.tokenizer, system_prompt=CENTRAL_SYSTEM_PROMPT
+            lambda item: raw, self.tokenizer, system_prompt=self.system_prompt
         )
         return formatter(batch_item)
 

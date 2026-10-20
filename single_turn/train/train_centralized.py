@@ -30,13 +30,14 @@ from single_turn.train.train_magrpo import (
     _load_data,
     _wandb_config,
 )
-from single_turn.train.train_mapl import budget_report, make_trainer_args as mapl_args
+from single_turn.train.train_mapl import (
+    CENTRALIZED_PROMPTS,
+    budget_report,
+    make_trainer_args as mapl_args,
+)
 
 ALGORITHMS = ("magrpo", "madpo", "madpo_iter", "marlhf", "marlhf_iter")
 MAGRPO_EVAL_SETTINGS = {"eval_at_end", "final_eval_num_samples", "rotate_eval_subset"}
-# "concatenated" embeds both role prompts; "native" writes one planner prompt
-# whose response holds one answer per subtask (MAGRPO only).
-CENTRALIZED_PROMPTS = ("concatenated", "native")
 
 
 def centralized_prompt_mode(config):
@@ -47,7 +48,8 @@ def centralized_prompt_mode(config):
         )
     if mode == "native" and config.get("algorithm") != "magrpo":
         raise ValueError(
-            "travel.centralized_prompt=native is implemented for MAGRPO only."
+            "travel.centralized_prompt=native is implemented for the MAGRPO actor "
+            "and for train_mapl.py's centralized comparator only."
         )
     return mode
 

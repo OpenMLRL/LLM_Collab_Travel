@@ -8,6 +8,7 @@ import torch
 
 from single_turn.aggregation import PLAN_FIELDS, ordered_owned_slots
 from single_turn.formatting import build_agent_json_prefill, get_single_turn_formatters
+from single_turn.structured_generation import FixedSlotJSONLogitsProcessor
 
 
 def joint_slots(days):
@@ -16,6 +17,20 @@ def joint_slots(days):
 
 class TravelCentralizedComparatorAdapter:
     """Centralization changes information sharing, not roles, reward or merge."""
+
+    # How a centralized model writes the joint answer: its chat system prompt,
+    # the assistant prefill, the slot order and the grammar that enforces it.
+    system_prompt = (
+        "You are one centralized travel planner. Plan both roles jointly and "
+        "return only the requested fixed-schema JSON."
+    )
+    skeleton_processor_cls = FixedSlotJSONLogitsProcessor
+
+    def assistant_prefill(self, days):
+        return build_agent_json_prefill(0, days)
+
+    def slot_order(self, days):
+        return joint_slots(days)
 
     def build_prompt(self, batch_item, agent_prompts):
         del agent_prompts  # Rebuild the same role content without nested chat tokens.

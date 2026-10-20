@@ -28,6 +28,9 @@ from single_turn.train.train_magrpo import (
 )
 
 ALGORITHMS = ("madpo", "madpo_iter", "marlhf", "marlhf_iter")
+# "concatenated" embeds both role prompts; "native" writes one planner prompt
+# whose answer holds one part per subtask.
+CENTRALIZED_PROMPTS = ("concatenated", "native")
 
 
 def load_config(path, seen=()):
@@ -187,6 +190,22 @@ def budget_report(config, args, train_count):
     return report
 
 
+def build_comparator_adapter(config):
+    """The prompt a centralized comparator answers, set by travel.centralized_prompt."""
+    mode = config.get("travel.centralized_prompt", "concatenated")
+    if mode not in CENTRALIZED_PROMPTS:
+        raise ValueError(
+            f"travel.centralized_prompt must be one of {CENTRALIZED_PROMPTS}."
+        )
+    if mode == "native":
+        from single_turn.centralized_native import TravelNativeCentralizedAdapter
+
+        return TravelNativeCentralizedAdapter()
+    from single_turn.centralized_comparator import TravelCentralizedComparatorAdapter
+
+    return TravelCentralizedComparatorAdapter()
+
+
 def main(default_algorithm=None):
     parser = add_config_args(argparse.ArgumentParser(description=__doc__))
     parser.add_argument("--algorithm", choices=ALGORITHMS, default=default_algorithm)
@@ -206,6 +225,7 @@ def main(default_algorithm=None):
             "--algorithm and config.algorithm disagree; select the matching configuration."
         )
     args = make_trainer_args(config)
+    comparator_adapter = build_comparator_adapter(config)
     train_rows, eval_rows = _load_data(config)
     final_count = int(config.get("evaluation.final_num_samples", len(eval_rows)))
     if (
@@ -289,8 +309,6 @@ def main(default_algorithm=None):
         "marlhf": TravelMARLHFTrainer,
         "marlhf_iter": TravelMARLHFIterTrainer,
     }
-    from single_turn.centralized_comparator import TravelCentralizedComparatorAdapter
-
     trainer = trainers[config.get("algorithm")](
         agent_model=model.name if names is None else None,
         agents=names,
@@ -315,7 +333,7 @@ def main(default_algorithm=None):
         ),
         wandb_config=wandb_config,
         args=args,
-        centralized_comparator_adapter=TravelCentralizedComparatorAdapter(),
+        centralized_comparator_adapter=comparator_adapter,
         eval_logger=build_single_turn_eval_logger(
             eval_rows, reward_config=reward.config, panel_size=args.eval_num_samples
         ),

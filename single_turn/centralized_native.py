@@ -274,8 +274,19 @@ character inside the already-open value string.
 class TravelNativeCentralizedAdapter:
     """Build the native planner prompt and split its two answers into roles."""
 
+    # The layout the native actor generates with: logistics answer first,
+    # then experience, under the sectioned grammar.
+    system_prompt = NATIVE_SYSTEM_PROMPT
+    skeleton_processor_cls = SectionedFixedSlotJSONLogitsProcessor
+
     def __init__(self, tokenizer: Any = None):
         self.tokenizer = tokenizer
+
+    def assistant_prefill(self, days: int) -> str:
+        return build_native_prefill(int(days))
+
+    def slot_order(self, days: int) -> List[Tuple[int, str]]:
+        return native_slots(int(days))
 
     def build_prompt(self, batch_item: Dict[str, Any], agent_prompts: Any) -> str:
         del agent_prompts  # The native prompt never embeds role prompts.
@@ -285,7 +296,7 @@ class TravelNativeCentralizedAdapter:
         formatter = wrap_formatter_with_chat_template(
             build_native_centralized_prompt,
             self.tokenizer,
-            system_prompt=NATIVE_SYSTEM_PROMPT,
+            system_prompt=self.system_prompt,
         )
         return formatter(batch_item)
 

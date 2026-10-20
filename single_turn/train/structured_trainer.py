@@ -679,6 +679,8 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
         prompts_override: Optional[List[str]] = None,
         external_prompts: Any = None,
         slot_order_override: Optional[List[tuple]] = None,
+        assistant_prefill_override: Optional[str] = None,
+        skeleton_processor_cls: Optional[type] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         prompts = self._resolve_prompts(
@@ -694,7 +696,12 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                     "travel.force_json_prefix=true requires chat-formatted prompts."
                 )
             prefixes = [
-                self._travel_assistant_prefill(agent_idx, item) for item in batch_items
+                (
+                    assistant_prefill_override
+                    if assistant_prefill_override is not None
+                    else self._travel_assistant_prefill(agent_idx, item)
+                )
+                for item in batch_items
             ]
             # Every generation call belongs to one agent, whose first role-owned
             # slot is invariant across Travel trip lengths. Keeping this explicit
@@ -738,12 +745,22 @@ class StructuredOutputMAGRPOTrainer(MAGRPOTrainer):
                 raise ValueError(
                     "A constrained generation batch must share one Travel slot order."
                 )
-            skeleton_processor = self._travel_skeleton_processor(
-                tokenizer,
-                prompt_length=prompt_length,
-                slots=slot_orders[0],
-                max_new_tokens=max_new_tokens,
-            )
+            if skeleton_processor_cls is None:
+                skeleton_processor = self._travel_skeleton_processor(
+                    tokenizer,
+                    prompt_length=prompt_length,
+                    slots=slot_orders[0],
+                    max_new_tokens=max_new_tokens,
+                )
+            else:
+                # A per-call grammar, such as the centralized comparator's.
+                skeleton_processor = skeleton_processor_cls(
+                    tokenizer,
+                    prompt_length=prompt_length,
+                    slots=slot_orders[0],
+                    max_value_tokens=int(getattr(self, "max_value_tokens", 32)),
+                    max_new_tokens=max_new_tokens,
+                )
             kwargs["logits_processor"] = with_fixed_slot_json_processor(
                 kwargs.get("logits_processor"), skeleton_processor
             )
