@@ -21,7 +21,7 @@ for path in (COMLRL_ROOT, REPO_ROOT):
         sys.path.insert(0, str(path))
 
 from single_turn.config import Config, add_config_args, parse_overrides, run_id
-from single_turn.train.checkpoint_launch import checkpoint_train_kwargs
+from single_turn.train.checkpoint_launch import parse_checkpoint_options
 from single_turn.train.train_magrpo import (
     _agent_names,
     _bool,
@@ -180,7 +180,7 @@ def main():
     )
     overrides = parse_overrides(cli.override)
     config.update(overrides)
-    checkpoint_options = checkpoint_train_kwargs(config)
+    checkpoint_options = parse_checkpoint_options(config)
     if cli.algorithm and config.get("algorithm") != cli.algorithm:
         raise ValueError("--algorithm and config.algorithm disagree.")
     wrong_section = "mapl" if config.get("algorithm") == "magrpo" else "magrpo"
