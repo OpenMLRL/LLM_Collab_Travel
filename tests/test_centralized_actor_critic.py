@@ -16,6 +16,7 @@ import torch
 from transformers import GPT2LMHeadModel
 
 from comlrl.trainers.actor_critic import MAACConfig
+from comlrl.trainers.pbrl.madpo import PreferencePair
 from single_turn.aggregation import ordered_owned_slots
 from single_turn.centralized_collaboration import TravelCentralizedCollaborationAdapter
 from single_turn.centralized_native import (
@@ -31,6 +32,9 @@ from single_turn.train.centralized_trainer import (
 )
 from single_turn.train.preference_trainer import (
     TravelMADPOIterTrainer,
+    TravelMADPOTrainer,
+    TravelMARLHFIterTrainer,
+    TravelMARLHFTrainer,
     TravelPreferenceTensors,
 )
 from test_actor_critic import ACTokenizer
@@ -309,15 +313,82 @@ class PreferenceReviewFixTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(restored.loser_loss_mask, tensors.loser_loss_mask))
 
-    def test_only_a_fresh_run_is_judged_by_its_own_pair_count(self):
+    def test_a_fresh_run_is_judged_by_its_own_pair_count(self):
         trainer = TravelMADPOIterTrainer.__new__(TravelMADPOIterTrainer)
         trainer.args = SimpleNamespace(eval_interval=0)
-        trainer.preference_pairs_generated = 0
         trainer._train_preference_algorithm = lambda **kwargs: "trained"
+        trainer.preference_pairs_generated = 0
         with self.assertRaisesRegex(RuntimeError, "no training occurred"):
             trainer.train()
-        resumed = trainer.train(resume_from_checkpoint="run/checkpoint-3")
-        self.assertEqual(resumed, "trained")
+        trainer.preference_pairs_generated = 3
+        self.assertEqual(trainer.train(), "trained")
+
+    def test_a_resumed_run_is_judged_by_its_checkpoint_progress(self):
+        pair = PreferencePair(
+            prompts=["p"],
+            winner_completions=["w"],
+            loser_completions=["l"],
+            agent_tensors=[],
+            winner_reward=1.0,
+            loser_reward=0.0,
+            candidate_reward_mean=0.5,
+        )
+        iterative = {"iteration": 2, "updates_seen": 0, "complete": True}
+        # Each algorithm's final progress after zero pairs, then after training.
+        cases = (
+            (
+                TravelMADPOTrainer,
+                {"kind": "madpo", "epoch": 0, "updates_seen": 0, "complete": True}
+                | {"preference_pairs": []},
+                {"kind": "madpo", "epoch": 1, "updates_seen": 2, "complete": True}
+                | {"preference_pairs": [pair]},
+            ),
+            (
+                TravelMARLHFTrainer,
+                {"kind": "marlhf", "phase": "complete"},
+                {"kind": "marlhf", "phase": "complete"}
+                | {"rl": {"kind": "magrpo", "epoch": 1}},
+            ),
+            (
+                TravelMADPOIterTrainer,
+                {"kind": "madpo_iter", "total_pairs": 0} | iterative,
+                {"kind": "madpo_iter", "total_pairs": 6} | iterative,
+            ),
+            (
+                TravelMARLHFIterTrainer,
+                {"kind": "marlhf_iter", "total_pairs": 0} | iterative,
+                {"kind": "marlhf_iter", "total_pairs": 6} | iterative,
+            ),
+        )
+        for cls, empty, trained in cases:
+            for progress in (empty, trained):
+                with self.subTest(cls=cls.__name__, progress=progress):
+                    trainer = cls.__new__(cls)
+                    trainer.args = SimpleNamespace(
+                        eval_interval=0,
+                        num_turns=1,
+                        num_train_epochs=1,
+                        num_iterations=2,
+                        rl_algorithm="magrpo",
+                    )
+                    trainer.preference_pairs_generated = 0
+
+                    def load(path, progress=progress, trainer=trainer):
+                        trainer._checkpoint_progress = dict(progress)
+
+                    # The real resume loop returns at once on a finished run.
+                    with patch.object(
+                        trainer, "load_checkpoint", side_effect=load
+                    ), patch.object(
+                        trainer, "_checkpoint_prepare_training", create=True
+                    ):
+                        if progress is empty:
+                            with self.assertRaisesRegex(
+                                RuntimeError, "no training occurred"
+                            ):
+                                trainer.train(resume_from_checkpoint="run/ckpt-3")
+                        else:
+                            trainer.train(resume_from_checkpoint="run/ckpt-3")
 
 
 if __name__ == "__main__":

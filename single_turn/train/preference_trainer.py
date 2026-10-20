@@ -94,10 +94,17 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if int(self.args.eval_interval) > 0:
             self.evaluate(num_eval_samples=int(self.args.eval_num_samples))
         result = self._train_preference_algorithm(**kwargs)
-        # The counter covers this process only. A resumed segment may reuse pairs
-        # generated before its checkpoint, so only a fresh run is judged here.
-        resumed = kwargs.get("resume_from_checkpoint") is not None
-        if self.preference_pairs_generated == 0 and not resumed:
+        # The counter covers this process only; checkpoint progress covers the
+        # whole run, including segments before a resume. MADPO keeps its pairs,
+        # the iterative trainers count them, and MARLHF records online-RL
+        # progress only after training its reward model.
+        progress = getattr(self, "_checkpoint_progress", None) or {}
+        trained = bool(
+            progress.get("preference_pairs")
+            or progress.get("total_pairs")
+            or "rl" in progress
+        )
+        if self.preference_pairs_generated == 0 and not trained:
             raise RuntimeError(
                 "No non-tied Travel preferences were generated; no training occurred. Increase preference_num_candidates or inspect the candidate rewards."
             )
