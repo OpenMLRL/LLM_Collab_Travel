@@ -14,7 +14,7 @@ for path in (REPO_ROOT.parent / "CoMLRL", REPO_ROOT):
         sys.path.insert(0, str(path))
 
 from single_turn.config import add_config_args, parse_overrides, run_id
-from single_turn.train.checkpoint_launch import checkpoint_train_kwargs
+from single_turn.train.checkpoint_launch import parse_checkpoint_options
 from single_turn.train.train_centralized import load_config
 from single_turn.train.train_magrpo import (
     _agent_names,
@@ -85,7 +85,7 @@ def main(default_algorithm=None):
     if set(updates) & {"magrpo", "mapl"}:
         raise ValueError("Use iac.* or maac.* overrides with this entrypoint.")
     config.update(updates)
-    checkpoint_options = checkpoint_train_kwargs(config)
+    checkpoint_options = parse_checkpoint_options(config)
     if config.get("algorithm") != algorithm:
         raise ValueError("--algorithm and config.algorithm disagree.")
     args = make_trainer_args(config)

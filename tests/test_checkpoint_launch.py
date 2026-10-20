@@ -17,7 +17,7 @@ for path in (ROOT.parent / "CoMLRL", ROOT):
 import comlrl.utils
 from single_turn.config import Config
 from single_turn.train.checkpoint_launch import (
-    checkpoint_train_kwargs,
+    parse_checkpoint_options,
     prepare_wandb_config,
 )
 from single_turn.train.train_magrpo import _wandb_config
@@ -33,7 +33,7 @@ def config_with(data):
 
 @pytest.mark.parametrize("section", [None, {}, {"checkpoint_dir": None}])
 def test_checkpoint_options_default_to_no_training_kwargs(section):
-    assert checkpoint_train_kwargs(config_with({"checkpoint": section})) == {}
+    assert parse_checkpoint_options(config_with({"checkpoint": section})) == {}
 
 
 @pytest.mark.parametrize(
@@ -55,7 +55,7 @@ def test_invalid_checkpoint_options_fail_before_io(section, monkeypatch):
         comlrl.utils, "read_checkpoint_metadata", Mock(side_effect=AssertionError)
     )
     with pytest.raises(ValueError, match="checkpoint"):
-        checkpoint_train_kwargs(config_with({"checkpoint": section}))
+        parse_checkpoint_options(config_with({"checkpoint": section}))
 
 
 def test_options_forward_only_explicit_non_null_settings():
@@ -65,7 +65,7 @@ def test_options_forward_only_explicit_non_null_settings():
         "checkpoint_interval": 2,
         "checkpoint_total_limit": None,
     }
-    assert checkpoint_train_kwargs(config_with({"checkpoint": values})) == {
+    assert parse_checkpoint_options(config_with({"checkpoint": values})) == {
         "resume_from_checkpoint": "saved/checkpoint-1",
         "checkpoint_dir": "new/checkpoints",
         "checkpoint_interval": 2,
