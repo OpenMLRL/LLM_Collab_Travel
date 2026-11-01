@@ -35,7 +35,7 @@ from single_turn.rewards.reference_evaluator import parse_reference_catalog
 from single_turn.rewards.single_turn_reward import score_single_turn_response
 from single_turn.structured_generation import DEFAULT_SYSTEM_PROMPT
 from single_turn.train.checkpoint_launch import (
-    checkpoint_train_kwargs,
+    parse_checkpoint_options,
     prepare_wandb_config,
 )
 
@@ -122,7 +122,7 @@ def _wandb_config(config: Config, output_dir: str, trainer_cfg: Dict[str, Any]):
             "trainer": trainer_cfg,
         },
     }
-    return prepare_wandb_config(config, wandb_config, checkpoint_train_kwargs(config))
+    return prepare_wandb_config(config, wandb_config, parse_checkpoint_options(config))
 
 
 def _contract_probe_completions(batch_item: Dict[str, Any]) -> List[str]:
@@ -326,7 +326,7 @@ def main() -> None:
     config = Config(args.config or str(DEFAULT_CONFIG))
     if args.override:
         config.update(parse_overrides(args.override))
-    checkpoint_options = checkpoint_train_kwargs(config)
+    checkpoint_options = parse_checkpoint_options(config)
 
     train_rows, eval_rows = _load_data(config)
     curriculum = _curriculum_plan(config, train_rows)
@@ -456,6 +456,9 @@ def main() -> None:
             magrpo_section.get("advantage_normalization", True), default=True
         ),
         advantage_mode=str(magrpo_section.get("advantage_mode", "mean")),
+        skip_zero_grad_steps=_bool(
+            magrpo_section.get("skip_zero_grad_steps", False), default=False
+        ),
         eval_interval=int(magrpo_section.get("eval_interval", 40)),
         eval_num_samples=int(magrpo_section.get("eval_num_samples", 4)),
         eval_batch_size=int(magrpo_section.get("eval_batch_size", 1)),
@@ -545,7 +548,9 @@ def main() -> None:
     # additional evaluation at the actual final env step so the W&B curve
     # includes the fully trained policy rather than ending one epoch early.
     if _bool(magrpo_section.get("eval_at_end", True), default=True):
-        trainer.evaluate(num_eval_samples=final_eval_samples)
+        metrics = trainer.evaluate(num_eval_samples=final_eval_samples)
+        with open(os.path.join(output_dir, "final_metrics.json"), "w") as handle:
+            handle.write(json.dumps(metrics, indent=2) + "\n")
 
     if _bool(config.get("output.save_final_model", False)):
         for agent_idx, agent in enumerate(trainer.agents):

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 import os
 
 
-def checkpoint_train_kwargs(config):
+def parse_checkpoint_options(config):
     """Return only explicitly configured checkpoint options, without reading files."""
     section = config.get("checkpoint")
     if section is None:

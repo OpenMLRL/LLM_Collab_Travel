@@ -252,8 +252,11 @@ unchanged.
 
 Periodic evaluation uses greedy argmax generation on the same P1 examples;
 training generation remains stochastic. This removes sampling noise from the
-within-run anchor comparison. The short curriculum evaluates every 120 env
-steps and the full phase every 240 env steps. Because the training distribution
+within-run anchor comparison. Evaluation runs every 30 prompts of an epoch,
+which is every 120 env steps in both the short and the full phase. The other
+algorithms use the same within-epoch interval (MADPO counts 6 optimizer updates
+instead). Runs started before this change used 60 (MAGRPO: 120 env steps in the
+short phase, 240 in the full phase) and 12 for MADPO. Because the training distribution
 changes at step 960, the fixed held-out eval curve—not a smoothed cross-phase
 training average—is the primary convergence curve.
 
@@ -419,6 +422,12 @@ selection. Actors and online evaluation remain decentralized. Central teacher
 projections are encoded under each actor's own prompt with value/schema masks;
 native role generations retain their exact sampled token trajectories. Neither
 path reads `annotated_plan` or `gold_plan`.
+
+By default the teacher answers the concatenated role prompts.
+`travel.centralized_prompt=native` gives it the
+[native planner prompt](#native-centralized-prompt-magrpo) instead, with the native
+MAGRPO actor's system prompt, assistant prefill, logistics-then-experience slot
+order and sectioned grammar; its two answers become the same role actions.
 
 For comparator ablations, use BFCL-style names such as
 `travel-marlhf-iter-central-currentcmp-seed42` (centralized) and
@@ -598,6 +607,36 @@ The new integration is tested with tiny CPU actors and real optimizer updates,
 not yet benchmarked with 4B models on B200. One actor reduces actor/model-state
 memory, but the longer joint context and reward-model phase still need a GPU
 smoke test before assuming a particular generation batch or memory peak.
+
+### Native centralized prompt (MAGRPO)
+
+The default centralized prompt embeds both decentralized role prompts and then
+overrides their agent instructions. `travel.centralized_prompt: native` (set in
+`single_turn_centralized_native_magrpo_config.yaml`) instead writes one planner
+prompt. It states the trip request, constraints, route scaffold, day-slot
+checklists, hard-constraint duties, budget contract and both role catalogs once.
+The planner then gives one answer per subtask, logistics first:
+
+```text
+{"logistics_answer": [{"day": 1, "field": "current_city", "value": "..."}, ...],
+ "experience_answer": [{"day": 1, "field": "breakfast", "value": "..."}, ...]}
+```
+
+The fixed skeleton forces every key and the switch between the two answers, so
+the policy still chooses only values, with the same per-value limit and
+value-only loss. A splitter turns each answer into the unchanged role action, so
+the merger, reward and evaluator are the same as for the two-agent team. With the
+Qwen3 tokenizer, the native prompt has a median of 6.5K tokens, against 8.6K for
+the concatenated prompt and 3.5K + 4.8K for the two role prompts. Native mode is
+implemented for MAGRPO only.
+
+```bash
+python -u single_turn/train/train_centralized.py \
+  --config single_turn/configs/single_turn_centralized_native_magrpo_config.yaml
+```
+
+The MAGRPO and centralized launchers write the final full-pool evaluation (all
+20 held-out rows, `eval_full/*`) to `final_metrics.json` in the run directory.
 
 ## Two-role IAC and MAAC
 

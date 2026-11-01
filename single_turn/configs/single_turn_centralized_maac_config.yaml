@@ -1,0 +1,15 @@
+# Opt-in joint actor for MAAC: one model answers the concatenated role prompts;
+# the centralized critic still reads both role prompts and role actions.
+extends: single_turn_maac_config.yaml
+maac:
+  collaboration_mode: centralized
+  num_agents: 2  # Logical roles; CoMLRL creates ONE actor.
+  parallel_training: none
+  agent_devices: ["cuda:0"]
+  critic_devices: ["cuda:0"]
+  max_new_tokens: 2048  # Total joint budget = two original 1024-token role budgets.
+output:
+  base_dir: output_single_turn_centralized_maac
+wandb:
+  name: travel-maac-cenactor
+  tags: [travelplanner, maac, centralized-collaboration, joint-actor, value-only, shared-critic]

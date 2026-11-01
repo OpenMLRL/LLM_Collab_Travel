@@ -18,13 +18,13 @@ for path in (ROOT.parent / "CoMLRL", ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from comlrl.trainers.preference import (
+from comlrl.trainers.pbrl import (
     MADPOConfig,
     MADPOIterConfig,
     MARLHFConfig,
     MARLHFIterConfig,
 )
-from comlrl.trainers.preference.madpo import PreferencePair
+from comlrl.trainers.pbrl.madpo import PreferencePair
 from comlrl.trainers.reinforce import MAGRPOTrainer
 from single_turn.formatting import build_agent_json_prefill
 from single_turn.rewards import make_reward

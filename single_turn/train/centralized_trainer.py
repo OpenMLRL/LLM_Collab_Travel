@@ -1,10 +1,13 @@
 """Opt-in centralized actors; existing Travel trainers are not modified."""
 
-from comlrl.trainers.reinforce import CentralizedMAGRPOTrainer
 from comlrl.utils.distributed import unwrap_model
 
 from single_turn.centralized_comparator import joint_slots
-from single_turn.formatting import build_agent_json_prefill
+from single_turn.centralized_native import (
+    SectionedFixedSlotJSONLogitsProcessor,
+    build_native_prefill,
+    native_slots,
+)
 from single_turn.train.preference_trainer import (
     TravelMADPOTrainer,
     TravelMADPOIterTrainer,
@@ -63,7 +66,7 @@ class TravelCentralizedActorMixin:
         tokenizer = self.tokenizers[0]
         prompt_length = len(
             tokenizer.encode(
-                prompts[0] + build_agent_json_prefill(0, batch_items[0]["days"]),
+                prompts[0] + self._travel_assistant_prefill(0, batch_items[0]),
                 add_special_tokens=True,
             )
         )
@@ -87,17 +90,20 @@ class TravelCentralizedActorMixin:
             max_new_tokens=max_new_tokens,
             prompts_override=prompts,
             external_prompts=None,
-            slot_order_override=joint_slots(batch_items[0]["days"]),
+            slot_order_override=self._centralized_slot_order(batch_items[0]["days"]),
             **kwargs,
         )
 
-    def _log_eval_metrics(self, all_agent_completions_turns, *args, **kwargs):
+    def _centralized_slot_order(self, days):
+        return joint_slots(days)
+
+    def _log_eval_metrics(
+        self, all_agent_completions_turns, all_batch_items, *args, **kwargs
+    ):
         # Travel's compact logger precedes the core logger in the MRO. Split
-        # here exactly once, using the items recorded by the core eval loop.
-        roles = self.centralized_collaboration.split_eval(
-            all_agent_completions_turns, self._centralized_eval_items
-        )
-        return super()._log_eval_metrics(roles, *args, **kwargs)
+        # here exactly once, using the items collected by the core eval loop.
+        roles = self._role_completions(all_agent_completions_turns, all_batch_items)
+        return super()._log_eval_metrics(roles, all_batch_items, *args, **kwargs)
 
 
 class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
@@ -126,7 +132,11 @@ class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
                 [batch_item],
                 agent_idx=0,
                 num_return_sequences=num_candidates,
-                max_new_tokens=self.args.max_new_tokens,
+                # As in CoMLRL, a set comparator budget replaces max_new_tokens.
+                max_new_tokens=getattr(
+                    self.args, "comparator_centralized_max_new_tokens", None
+                )
+                or self.args.max_new_tokens,
                 prompts_override=[prompt],
                 **kwargs,
             )
@@ -149,7 +159,35 @@ class TravelCentralizedPreferenceMixin(TravelCentralizedActorMixin):
 
 
 class TravelCentralizedMAGRPOTrainer(
-    TravelCentralizedActorMixin, StructuredOutputMAGRPOTrainer, CentralizedMAGRPOTrainer
+    TravelCentralizedActorMixin, StructuredOutputMAGRPOTrainer
+):
+    pass
+
+
+class TravelNativeCentralizedActorMixin(TravelCentralizedActorMixin):
+    """Generate the logistics answer, then the experience answer, in one call."""
+
+    def _centralized_slot_order(self, days):
+        return native_slots(days)
+
+    def _travel_assistant_prefill(self, agent_idx, batch_item):
+        return build_native_prefill(int(batch_item.get("days", 0)))
+
+    def _travel_skeleton_processor(
+        self, tokenizer, *, prompt_length, slots, max_new_tokens
+    ):
+        return SectionedFixedSlotJSONLogitsProcessor(
+            tokenizer,
+            prompt_length=prompt_length,
+            slots=slots,
+            max_value_tokens=int(getattr(self, "max_value_tokens", 32)),
+            max_new_tokens=max_new_tokens,
+        )
+
+
+class TravelNativeCentralizedMAGRPOTrainer(
+    TravelNativeCentralizedActorMixin,
+    StructuredOutputMAGRPOTrainer,
 ):
     pass
 
@@ -174,5 +212,21 @@ class TravelCentralizedMARLHFTrainer(
 
 class TravelCentralizedMARLHFIterTrainer(
     TravelCentralizedPreferenceMixin, TravelMARLHFIterTrainer
+):
+    pass
+
+
+class TravelNativeCentralizedMADPOIterTrainer(
+    TravelNativeCentralizedActorMixin,
+    TravelCentralizedPreferenceMixin,
+    TravelMADPOIterTrainer,
+):
+    pass
+
+
+class TravelNativeCentralizedMARLHFIterTrainer(
+    TravelNativeCentralizedActorMixin,
+    TravelCentralizedPreferenceMixin,
+    TravelMARLHFIterTrainer,
 ):
     pass

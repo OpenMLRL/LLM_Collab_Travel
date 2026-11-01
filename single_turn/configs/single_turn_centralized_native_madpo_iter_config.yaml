@@ -1,0 +1,10 @@
+# Opt-in native joint prompt: the joint actor and its comparator answer the
+# logistics subtask, then the experience subtask, in one response.
+extends: single_turn_centralized_madpo_iter_config.yaml
+travel:
+  centralized_prompt: native
+output:
+  base_dir: output_single_turn_centralized_native_madpo_iter
+wandb:
+  name: travel-madpo-iter-cenactor-native-central-currentcmp
+  tags: [travelplanner, mapl, centralized-collaboration, centralized-comparator, joint-actor, native-prompt, fixed-reward]

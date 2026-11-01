@@ -99,6 +99,22 @@ class TravelActorCriticMixin:
         target = device or self.device
         return {key: encoded[key].to(target) for key in ("input_ids", "attention_mask")}
 
+    def _travel_layout(self, agent_idx, days):
+        """The assistant prefill, slot order and grammar of one generation."""
+        if self.is_centralized:
+            # A joint actor writes its adapter's layout, as centralized MAGRPO does.
+            adapter = self.centralized_collaboration.adapter
+            return (
+                adapter.assistant_prefill(days),
+                adapter.slot_order(days),
+                adapter.skeleton_processor_cls,
+            )
+        return (
+            build_agent_json_prefill(agent_idx, days),
+            ordered_owned_slots(agent_idx, days),
+            FixedSlotJSONLogitsProcessor,
+        )
+
     def _generate_travel(self, agent_model, prompt, agent_idx, num_ret):
         item = self._travel_item
         if item is None:
@@ -107,7 +123,7 @@ class TravelActorCriticMixin:
         model = unwrap_model(agent_model)
         device = self.agent_devices[agent_idx]
         apply_tokenizer_specials(tokenizer, [model])
-        prefix = build_agent_json_prefill(agent_idx, int(item["days"]))
+        prefix, slots, grammar_cls = self._travel_layout(agent_idx, int(item["days"]))
         encoded = self._encode_prompt(prompt + prefix, agent_idx, device=device)
         prompt_len = encoded["input_ids"].shape[1]
         backbone = getattr(model, "model", model)
@@ -116,10 +132,10 @@ class TravelActorCriticMixin:
             raise ValueError(
                 "Travel prompt plus response budget exceeds the model context window."
             )
-        grammar = FixedSlotJSONLogitsProcessor(
+        grammar = grammar_cls(
             tokenizer,
             prompt_length=prompt_len,
-            slots=ordered_owned_slots(agent_idx, int(item["days"])),
+            slots=slots,
             max_value_tokens=self.max_value_tokens,
             max_new_tokens=self.args.max_new_tokens,
         )
@@ -262,7 +278,9 @@ class TravelActorCriticMixin:
                 "route_scaffold_match_rate": "route_scaffold_match",
             }
             metrics = {}
-            for key, value in travel_actor_critic_metrics(samples).items():
+            # A joint actor's samples are split into the two roles first.
+            role_metrics = self._role_metrics_callback(travel_actor_critic_metrics)
+            for key, value in role_metrics(samples).items():
                 key = key.removeprefix("turn_1/").removeprefix("ultimate/")
                 metrics[f"{namespace}/{aliases.get(key, key)}"] = value
             rewards = [
@@ -274,7 +292,7 @@ class TravelActorCriticMixin:
                 metrics[f"{namespace}/reward"] = sum(rewards) / len(rewards)
             return metrics
 
-        anchor = rollouts[: 2 * self.args.eval_num_samples]
+        anchor = rollouts[: self.num_agents * self.args.eval_num_samples]
         metrics = summarize(anchor, "eval")
         self._log_metrics(metrics)
         if count > self.args.eval_num_samples:

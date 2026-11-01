@@ -2,22 +2,40 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import torch
+from transformers import GPT2LMHeadModel
 
+from comlrl.trainers.pbrl import MADPOIterConfig
 from single_turn.aggregation import merge_agent_assignments, ordered_owned_slots
 from single_turn.centralized_comparator import (
     TravelCentralizedComparatorAdapter,
     joint_slots,
     project_role_tokens,
 )
+from single_turn.centralized_native import (
+    NATIVE_SECTION_KEYS,
+    NATIVE_SYSTEM_PROMPT,
+    SectionedFixedSlotJSONLogitsProcessor,
+    TravelNativeCentralizedAdapter,
+    build_native_prefill,
+    native_slots,
+)
 from single_turn.formatting import build_agent_json_prefill
+from single_turn.rewards import make_reward
+from single_turn.train.preference_trainer import TravelMADPOIterTrainer
 from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer
-from single_turn.train.train_mapl import load_config, make_trainer_args
-from test_preference_training import ROOT, bare_trainer
+from single_turn.train.train_mapl import (
+    build_comparator_adapter,
+    load_config,
+    make_trainer_args,
+)
+from test_preference_training import ROOT, bare_trainer, tiny_config
 from test_single_turn import fixture_item, valid_completions
 from test_structured_generation import _TinyGenerationTokenizer
 from test_structured_generation import FakeTokenizer
@@ -32,6 +50,18 @@ def joint_text(days=3, value="-"):
                 {"day": day, "field": field, "value": value}
                 for day, field in joint_slots(days)
             ],
+        }
+    )
+
+
+def native_joint_text(days=3, value="-"):
+    return json.dumps(
+        {
+            key: [
+                {"day": day, "field": field, "value": value}
+                for day, field in ordered_owned_slots(agent_idx, days)
+            ]
+            for agent_idx, key in enumerate(NATIVE_SECTION_KEYS)
         }
     )
 
@@ -207,10 +237,135 @@ class CentralizedTravelTests(unittest.TestCase):
         trainer.args.comparator_centralized_agent_index = 0
         trainer.tokenizers = [_TinyGenerationTokenizer()] * 2
         trainer.agents[0].config = SimpleNamespace(max_position_embeddings=100)
+        trainer.centralized_comparator_adapter = TravelCentralizedComparatorAdapter()
         with self.assertRaisesRegex(ValueError, "refusing truncation"):
             trainer._generate_centralized_policy_output_for_agent(
                 trainer.agents[0], {"days": 3}, prompt="joint", num_candidates=20
             )
+
+    def test_native_comparator_uses_the_native_layout_and_role_actions(self):
+        trainer = bare_trainer()
+        trainer.args.max_new_tokens = 1024
+        trainer.args.comparator_centralized_agent_index = 0
+        trainer.agents[0].config = SimpleNamespace(max_position_embeddings=32768)
+        trainer.tokenizers = [_TinyGenerationTokenizer(), _TinyGenerationTokenizer()]
+        trainer.formatters = [lambda item: "role0", lambda item: "role1"]
+        trainer.centralized_comparator_adapter = TravelNativeCentralizedAdapter()
+        trainer.preference_generation_batch_size = 2
+        trainer.preference_joint_candidates = 0
+        trainer._preference_trajectories = None
+        calls = []
+
+        def generate(self, agent, items, **kwargs):
+            calls.append(kwargs)
+            completions = [native_joint_text()] * kwargs["num_return_sequences"]
+            return {"completions": [completions]}
+
+        with patch.object(
+            trainer, "_offload_actors", return_value=nullcontext()
+        ), patch.object(
+            trainer, "_comparator_rng", return_value=nullcontext()
+        ), patch.object(
+            StructuredOutputMAGRPOTrainer, "_generate_completions", generate
+        ):
+            outputs = trainer._generate_centralized_policy_output_for_agent(
+                trainer.agents[0], {"days": 3}, prompt="joint", num_candidates=1
+            )
+        (call,) = calls
+        self.assertEqual(call["max_new_tokens"], 2048)
+        self.assertEqual(call["slot_order_override"], native_slots(3))
+        self.assertEqual(call["assistant_prefill_override"], build_native_prefill(3))
+        self.assertIs(
+            call["skeleton_processor_cls"], SectionedFixedSlotJSONLogitsProcessor
+        )
+        # One plan, answered natively or concatenated, gives the same role actions.
+        roles = TravelCentralizedComparatorAdapter().parse_completion(
+            joint_text(), {"days": 3}, 2
+        )
+        for i in range(2):
+            expected = project_role_tokens(trainer.tokenizers[i], roles[i], i, 3)[0]
+            self.assertEqual(outputs[i]["completions"][0], [expected])
+
+    def test_native_comparator_real_generation_fills_each_role(self):
+        torch.set_num_threads(1)
+        item = fixture_item()
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = TravelMADPOIterTrainer(
+                agents=[GPT2LMHeadModel(tiny_config()), GPT2LMHeadModel(tiny_config())],
+                num_agents=2,
+                tokenizer=_TinyGenerationTokenizer(),
+                reward_func=make_reward(),
+                train_dataset=[item],
+                eval_dataset=[item],
+                formatters=[lambda row: "role0", lambda row: "role1"],
+                args=MADPOIterConfig(
+                    num_agents=2,
+                    agent_devices=["cpu", "cpu"],
+                    comparator_devices=["cpu", "cpu"],
+                    comparator_policy="current_copy",
+                    comparator_generation_mode="centralized",
+                    preference_replay_dir=str(Path(directory) / "replay"),
+                    max_new_tokens=1024,
+                    num_train_epochs=1,
+                    eval_interval=0,
+                    eval_num_samples=1,
+                ),
+                chat_formatted_prompts=True,
+                centralized_comparator_adapter=TravelNativeCentralizedAdapter(),
+            )
+            trainer.max_value_tokens = 2
+            outputs = trainer._generate_centralized_policy_output_for_agent(
+                trainer.agents[0], item, prompt="joint context", num_candidates=1
+            )
+        # Real constrained decoding followed the native layout, and its two answers
+        # became the decentralized role actions.
+        for i in range(2):
+            (text,) = outputs[i]["completions"][0]
+            data = json.loads(text)
+            self.assertEqual(data["agent_id"], i)
+            self.assertEqual(
+                [(a["day"], a["field"]) for a in data["assignments"]],
+                ordered_owned_slots(i, item["days"]),
+            )
+
+    def test_comparator_prompt_uses_the_adapter_system_prompt(self):
+        trainer = bare_trainer()
+        trainer.tokenizers = [object()]
+        seen = []
+
+        def wrap(formatter, tokenizer, *, system_prompt):
+            seen.append(system_prompt)
+            return formatter
+
+        adapters = (
+            TravelCentralizedComparatorAdapter(),
+            TravelNativeCentralizedAdapter(),
+        )
+        for adapter in adapters:
+            trainer.centralized_comparator_adapter = adapter
+            with patch(
+                "single_turn.train.preference_trainer.wrap_formatter_with_chat_template",
+                wrap,
+            ):
+                prompt = trainer._build_centralized_comparator_prompt(fixture_item())
+            self.assertEqual(prompt, adapter.build_prompt(fixture_item(), []))
+        self.assertEqual(
+            seen,
+            [TravelCentralizedComparatorAdapter.system_prompt, NATIVE_SYSTEM_PROMPT],
+        )
+
+    def test_comparator_prompt_follows_travel_centralized_prompt(self):
+        config = load_config(
+            ROOT / "single_turn/configs/single_turn_madpo_iter_config.yaml"
+        )
+        adapter = build_comparator_adapter(config)
+        self.assertIs(type(adapter), TravelCentralizedComparatorAdapter)
+        config.update({"travel": {"centralized_prompt": "native"}})
+        adapter = build_comparator_adapter(config)
+        self.assertIs(type(adapter), TravelNativeCentralizedAdapter)
+        config.update({"travel": {"centralized_prompt": "joint"}})
+        with self.assertRaisesRegex(ValueError, "centralized_prompt"):
+            build_comparator_adapter(config)
 
     def test_central_history_loaded_once_per_collection_and_released(self):
         trainer = bare_trainer()

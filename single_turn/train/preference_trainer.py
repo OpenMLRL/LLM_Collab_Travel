@@ -19,21 +19,23 @@ import torch.nn.functional as F
 import wandb
 from transformers import AutoModel, AutoTokenizer
 
-from comlrl.trainers.preference import (
+from comlrl.trainers.pbrl import (
     MADPOTrainer,
     MADPOIterTrainer,
     MARLHFIterTrainer,
     MARLHFTrainer,
 )
-from comlrl.trainers.preference.madpo import AgentPreferenceTensors, PreferencePair
+from comlrl.trainers.pbrl.madpo import AgentPreferenceTensors, PreferencePair
+from comlrl.utils.checkpoint import register_checkpoint_record
 from comlrl.utils.distributed import unwrap_model
 from comlrl.utils.tokenizer_utils import ensure_pad_token
 from single_turn.train.structured_trainer import StructuredOutputMAGRPOTrainer
 from single_turn.formatting import build_agent_json_prefill
-from single_turn.centralized_comparator import joint_slots, project_role_tokens
+from single_turn.centralized_comparator import project_role_tokens
 from single_turn.structured_generation import wrap_formatter_with_chat_template
 
 
+@register_checkpoint_record
 @dataclass
 class TravelPreferenceTensors(AgentPreferenceTensors):
     winner_loss_mask: torch.Tensor
@@ -92,7 +94,17 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         if int(self.args.eval_interval) > 0:
             self.evaluate(num_eval_samples=int(self.args.eval_num_samples))
         result = self._train_preference_algorithm(**kwargs)
-        if self.preference_pairs_generated == 0:
+        # The counter covers this process only; checkpoint progress covers the
+        # whole run, including segments before a resume. MADPO keeps its pairs,
+        # the iterative trainers count them, and MARLHF records online-RL
+        # progress only after training its reward model.
+        progress = getattr(self, "_checkpoint_progress", None) or {}
+        trained = bool(
+            progress.get("preference_pairs")
+            or progress.get("total_pairs")
+            or "rl" in progress
+        )
+        if self.preference_pairs_generated == 0 and not trained:
             raise RuntimeError(
                 "No non-tied Travel preferences were generated; no training occurred. Increase preference_num_candidates or inspect the candidate rewards."
             )
@@ -246,11 +258,10 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
         return super()._get_centralized_comparator_agent()
 
     def _build_centralized_comparator_prompt(self, batch_item):
-        raw = self.centralized_comparator_adapter.build_prompt(batch_item, [])
+        adapter = self.centralized_comparator_adapter
+        raw = adapter.build_prompt(batch_item, [])
         formatter = wrap_formatter_with_chat_template(
-            lambda item: raw,
-            self.tokenizers[0],
-            system_prompt="You are one centralized travel planner. Plan both roles jointly and return only the requested fixed-schema JSON.",
+            lambda item: raw, self.tokenizers[0], system_prompt=adapter.system_prompt
         )
         return formatter(batch_item)
 
@@ -292,13 +303,17 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
     ):
         if self._centralized_comparator_agent_index() != 0:
             raise ValueError("Travel centralized comparator uses policy agent index 0.")
-        # The joint teacher has the same aggregate token budget as two role calls.
-        budget = self.num_agents * int(self.args.max_new_tokens)
+        # The adapter fixes the joint answer's prefill, slot order and grammar.
+        adapter = self.centralized_comparator_adapter
+        days = batch_item["days"]
+        prefill = adapter.assistant_prefill(days)
+        # The joint teacher gets the role calls' aggregate budget unless the
+        # config sets its own.
+        budget = getattr(
+            self.args, "comparator_centralized_max_new_tokens", None
+        ) or self.num_agents * int(self.args.max_new_tokens)
         input_length = len(
-            self.tokenizers[0].encode(
-                prompt + build_agent_json_prefill(0, batch_item["days"]),
-                add_special_tokens=False,
-            )
+            self.tokenizers[0].encode(prompt + prefill, add_special_tokens=False)
         )
         model_limit = getattr(
             unwrap_model(policy_agent).config, "max_position_embeddings", None
@@ -329,7 +344,9 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
                     num_return_sequences=count,
                     max_new_tokens=budget,
                     prompts_override=[prompt],
-                    slot_order_override=joint_slots(batch_item["days"]),
+                    slot_order_override=adapter.slot_order(days),
+                    assistant_prefill_override=prefill,
+                    skeleton_processor_cls=adapter.skeleton_processor_cls,
                     **kwargs,
                 )
                 all_texts.extend(result["completions"][0])
@@ -346,9 +363,7 @@ class TravelPreferenceMixin(StructuredOutputMAGRPOTrainer):
             for i in range(2)
         ]
         for joint_text in all_texts:
-            split = self.centralized_comparator_adapter.parse_completion(
-                joint_text, batch_item, self.num_agents
-            )
+            split = adapter.parse_completion(joint_text, batch_item, self.num_agents)
             for i, role_text in enumerate(split):
                 text, tokens, mask = project_role_tokens(
                     self.tokenizers[i], role_text, i, batch_item["days"]
@@ -712,7 +727,7 @@ class TravelRewardModelMixin:
         for idx, prompt in enumerate(prompts):
             # The prefill is independent of trip length. Remove only a trailing
             # prefill, never JSON examples embedded in the role instructions.
-            prefix = build_agent_json_prefill(idx, 3)
+            prefix = self._travel_assistant_prefill(idx, {"days": 3})
             contexts.append(
                 prompt[: -len(prefix)] if prompt.endswith(prefix) else prompt
             )

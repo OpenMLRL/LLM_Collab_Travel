@@ -22,7 +22,7 @@ iac:
   value_clip_range: 0.2
   discount: 1.0
   early_termination_threshold: null
-  eval_interval: 60
+  eval_interval: 30
   eval_num_samples: 4
   eval_batch_size: 1
   reference_kl_enabled: false

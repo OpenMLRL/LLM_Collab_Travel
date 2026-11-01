@@ -19,14 +19,14 @@ for path in (ROOT.parent / "CoMLRL", ROOT):
 import torch
 from transformers import GPT2LMHeadModel
 
-from comlrl.trainers.preference import (
+from comlrl.trainers.pbrl import (
     MADPOConfig,
     MADPOIterConfig,
     MARLHFConfig,
     MARLHFIterConfig,
 )
-from comlrl.trainers.preference.collaboration import CentralizedCollaboration
-from comlrl.trainers.reinforce import CentralizedMAGRPOConfig
+from comlrl.trainers.centralized import CentralizedCollaboration
+from comlrl.trainers.reinforce import MAGRPOConfig
 from single_turn.centralized_collaboration import TravelCentralizedCollaborationAdapter
 from single_turn.centralized_comparator import joint_slots
 from single_turn.formatting import build_agent_json_prefill, get_single_turn_formatters
@@ -87,7 +87,7 @@ class TinyAdapter(TravelCentralizedCollaborationAdapter):
 
 
 TRAINERS = (
-    (TravelCentralizedMAGRPOTrainer, CentralizedMAGRPOConfig),
+    (TravelCentralizedMAGRPOTrainer, MAGRPOConfig),
     (TravelCentralizedMADPOTrainer, MADPOConfig),
     (TravelCentralizedMADPOIterTrainer, MADPOIterConfig),
     (TravelCentralizedMARLHFTrainer, MARLHFConfig),
@@ -207,7 +207,7 @@ class CentralizedConfigTests(unittest.TestCase):
                 trainer = SimpleNamespace(
                     agents=[actor],
                     train=Mock(),
-                    evaluate=Mock(),
+                    evaluate=Mock(return_value={"eval_full/reward": 0.5}),
                     env_step=0,
                     wandb_initialized=False,
                 )
@@ -260,6 +260,10 @@ class CentralizedConfigTests(unittest.TestCase):
                 trainer.train.assert_called_once()
                 trainer.evaluate.assert_called_once_with(num_eval_samples=1)
                 self.assertEqual(len(list(Path(directory).glob("*/config.yaml"))), 1)
+                (saved,) = Path(directory).glob("*/final_metrics.json")
+                self.assertEqual(
+                    json.loads(saved.read_text()), {"eval_full/reward": 0.5}
+                )
 
     def test_new_configs_are_explicit_and_inherit_domain_budget(self):
         for algorithm in ALGORITHMS:
@@ -446,7 +450,6 @@ class CentralizedLoopTests(unittest.TestCase):
                 )
                 self.assertIn("eval/reward", metrics)
                 self.assertIn("eval/reference_plan_success", metrics)
-                self.assertFalse(trainer._centralized_eval_items)
                 if cls is TravelCentralizedMAGRPOTrainer:
                     self.assertEqual(
                         trainer.env_step, 2
