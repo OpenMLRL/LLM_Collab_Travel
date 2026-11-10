@@ -241,6 +241,16 @@ def main():
             raise ValueError(f"Reference catalog parsing failed: {row.get('id')}")
     curriculum = _curriculum_plan(config, train_rows) if magrpo else None
     reward = make_reward(config.get_section("travel_reward"))
+    preference_metric = config.get("travel.preference_metric")
+    if magrpo and preference_metric is not None:
+        raise ValueError("travel.preference_metric applies to preference algorithms.")
+    from single_turn.rewards.preference_metrics import get_preference_metric
+
+    # A metric from rewards/preference_metrics.py chooses the preference pairs
+    # instead of the reward; without one the reward chooses them.
+    preference_metric_func = get_preference_metric(
+        preference_metric, config.get_section("travel_reward")
+    )
     report = {
         "algorithm": algorithm,
         "collaboration_mode": "centralized",
@@ -254,6 +264,7 @@ def main():
         "periodic_eval_samples": args.eval_num_samples,
         "final_eval_samples": final_count,
         "reward_range": list(reward.reward_range),
+        "preference_metric": preference_metric,
         "joint_max_new_tokens": args.max_new_tokens,
         **(
             {"expected_env_steps": curriculum["expected_env_steps"]}
@@ -375,6 +386,7 @@ def main():
     else:
         mode_kwargs.update(
             curriculum_short_epochs=0,
+            preference_metric_func=preference_metric_func,
             preference_generation_batch_size=int(
                 config.get("travel.preference_generation_batch_size", 20)
             ),

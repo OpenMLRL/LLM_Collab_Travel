@@ -237,8 +237,15 @@ def main(default_algorithm=None):
             "Training must be nonempty; periodic/final eval counts must fit the held-out pool."
         )
     from single_turn.rewards import make_reward
+    from single_turn.rewards.preference_metrics import get_preference_metric
 
     reward = make_reward(config.get_section("travel_reward"))
+    # A metric from rewards/preference_metrics.py chooses the preference pairs
+    # instead of the reward; without one the reward chooses them.
+    preference_metric = config.get("travel.preference_metric")
+    preference_metric_func = get_preference_metric(
+        preference_metric, config.get_section("travel_reward")
+    )
     report = {
         "algorithm": config.get("algorithm"),
         "seed": config.get("seed"),
@@ -247,6 +254,7 @@ def main(default_algorithm=None):
         "periodic_eval_samples": args.eval_num_samples,
         "agent_devices": args.agent_devices,
         "reward_range": [reward.config.min_reward, reward.config.max_reward],
+        "preference_metric": preference_metric,
         **budget_report(config, args, len(train_rows)),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -257,6 +265,13 @@ def main(default_algorithm=None):
             "Contract probe:",
             reward([actions[0]], [actions[1]], batch_items=[train_rows[0]]),
         )
+        if preference_metric_func is not None:
+            print(
+                "Preference metric probe:",
+                preference_metric_func(
+                    [actions[0]], [actions[1]], batch_items=[train_rows[0]]
+                ),
+            )
         return
 
     import numpy as np
@@ -334,6 +349,7 @@ def main(default_algorithm=None):
         wandb_config=wandb_config,
         args=args,
         centralized_comparator_adapter=comparator_adapter,
+        preference_metric_func=preference_metric_func,
         eval_logger=build_single_turn_eval_logger(
             eval_rows, reward_config=reward.config, panel_size=args.eval_num_samples
         ),
